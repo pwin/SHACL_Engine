@@ -26,10 +26,16 @@ Three decisions carry most of the performance:
 
 ## Conformance
 
-The suites are run by a manifest-driven harness. Expected and actual reports are
-compared through one in-memory representation rather than by diffing serialised
-RDF; `sh:resultMessage` is excluded, since the spec leaves message text to the
-implementation.
+The suites are run by a manifest-driven harness covering both kinds of entry:
+`sht:Validate`, which validates a data graph and compares reports, and
+`sht:EvalNodeExpr`, which evaluates a node expression and compares the resulting
+sequence. Expected and actual reports are compared through one in-memory
+representation rather than by diffing serialised RDF; `sh:resultMessage` is
+excluded, since the spec leaves message text to the implementation.
+
+**299 of 426** tests pass. The remainder are node expressions: the `shnex-sparql`
+group, which exposes the SPARQL function library as node expressions, is not
+implemented, and parts of the `shnex` algebra are still missing.
 
 ```sh
 cargo test -p shacl --test w3c -- --nocapture      # summary

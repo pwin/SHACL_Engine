@@ -12,6 +12,7 @@
 pub mod datatypes;
 pub mod error;
 pub mod model;
+pub mod nodeexpr;
 pub mod path;
 pub mod report;
 pub mod shapes;

@@ -112,17 +112,88 @@ fn run_manifest(manifest: &Path, out: &mut Vec<Outcome>) {
         }
     }
 
+    // Two kinds of entry: `sht:Validate` runs a validation and compares
+    // reports, `sht:EvalNodeExpr` evaluates a node expression and compares the
+    // resulting sequence.
+    let eval_node_expr = store.named_node(&format!("{}EvalNodeExpr", shacl::model::vocab::SHT));
+    let shnex = shacl::nodeexpr::Shnex::new(&mut store);
+
     for entry in entries {
-        if !graph.contains(entry, vocab.rdf_type, vocab.sht_Validate) {
+        let is_validate = graph.contains(entry, vocab.rdf_type, vocab.sht_Validate);
+        let is_eval = graph.contains(entry, vocab.rdf_type, eval_node_expr);
+        if !is_validate && !is_eval {
             continue;
         }
         let name = store
             .iri(entry)
             .map(|i| short_name(i, manifest))
             .unwrap_or_else(|| format!("{}#?", manifest.display()));
-        let status = run_one(entry, &graph, &mut store, &vocab, manifest);
+        let status = if is_validate {
+            run_one(entry, &graph, &mut store, &vocab, manifest)
+        } else {
+            run_node_expr(entry, &graph, &mut store, &vocab, &shnex)
+        };
         out.push(Outcome { name, status });
     }
+}
+
+/// Runs one `sht:EvalNodeExpr` entry.
+///
+/// `mf:result` is an RDF list, and node expressions produce a *sequence*, so
+/// the comparison is order-sensitive.
+fn run_node_expr(
+    entry: TermId,
+    manifest: &Graph,
+    store: &mut TermStore,
+    vocab: &Vocab,
+    shnex: &shacl::nodeexpr::Shnex,
+) -> Status {
+    let Some(action) = manifest.object(entry, vocab.mf_action) else {
+        return Status::Error("entry has no mf:action".into());
+    };
+    let node_expr_p = store.named_node(&format!("{}nodeExpr", shacl::model::vocab::SHT));
+    let focus_p = store.named_node(&format!("{}focusNode", shacl::model::vocab::SHT));
+
+    let Some(expr) = manifest.object(action, node_expr_p) else {
+        return Status::Error("mf:action has no sht:nodeExpr".into());
+    };
+    let focus = manifest.object(action, focus_p);
+
+    let expected: Vec<TermId> = match manifest.object(entry, vocab.mf_result) {
+        Some(head) => match manifest.list(head, vocab) {
+            Some(items) => items,
+            None => return Status::Error("mf:result is not a well-formed list".into()),
+        },
+        None => return Status::Error("entry has no mf:result".into()),
+    };
+
+    let actual = {
+        let ctx = shacl::nodeexpr::Ctx {
+            data: manifest,
+            exprs: manifest,
+            vocab,
+            shnex,
+        };
+        match shacl::nodeexpr::eval(expr, focus, &ctx, store) {
+            Ok(v) => v,
+            Err(e) => return Status::Error(format!("{e}")),
+        }
+    };
+
+    if actual == expected {
+        return Status::Pass;
+    }
+    let show = |ts: &[TermId], store: &TermStore| {
+        ts.iter()
+            .map(|&t| store.to_oxrdf(t).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Status::Mismatch(format!(
+        "expected ({})\n      got      ({})",
+        show(&expected, store),
+        show(&actual, store)
+    ))
 }
 
 /// A stable, readable id like `core/node/datatype-001`.
@@ -387,7 +458,7 @@ fn w3c_test_suites() {
 
 /// Guards against regressions: the pass count must never drop below this.
 /// Raise it as the engine gains coverage.
-const BASELINE_PASSING: usize = 260;
+const BASELINE_PASSING: usize = 299;
 
 #[test]
 fn progress() {
