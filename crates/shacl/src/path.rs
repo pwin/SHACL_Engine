@@ -161,11 +161,16 @@ impl Path {
     /// the focus node every violation must name, survive a compound path.
     pub fn eval_sets(&self, focus: &[TermId], data: &Graph) -> ValueSets {
         let mut b = valueset::Builder::with_capacity(focus.len());
-        let mut scratch = Vec::new();
+        let mut row = Vec::new();
+        // One scratch pool for the whole relation. Compound paths need working
+        // buffers per nesting level, and allocating them per focus node dwarfed
+        // the traversal itself: a two-step sequence over 100k focus nodes meant
+        // 200k allocations to move a handful of terms each.
+        let mut scratch = Scratch::default();
         for &f in focus {
-            scratch.clear();
-            self.expand(std::slice::from_ref(&f), data, &mut scratch, false);
-            b.push_row(f, &scratch);
+            row.clear();
+            self.expand(std::slice::from_ref(&f), data, &mut row, false, &mut scratch);
+            b.push_row(f, &row);
         }
         b.finish()
     }
@@ -173,7 +178,13 @@ impl Path {
     /// Appends the value nodes reachable from `focus` to `out`, deduplicated.
     pub fn eval(&self, focus: TermId, data: &Graph, out: &mut Vec<TermId>) {
         let mut buf = Vec::new();
-        self.expand(std::slice::from_ref(&focus), data, &mut buf, false);
+        self.expand(
+            std::slice::from_ref(&focus),
+            data,
+            &mut buf,
+            false,
+            &mut Scratch::default(),
+        );
         sort_dedup(&mut buf);
         out.extend(buf);
     }
@@ -181,7 +192,13 @@ impl Path {
     /// Evaluates the path backwards: the nodes from which `node` is reachable.
     pub fn eval_inverse(&self, node: TermId, data: &Graph, out: &mut Vec<TermId>) {
         let mut buf = Vec::new();
-        self.expand(std::slice::from_ref(&node), data, &mut buf, true);
+        self.expand(
+            std::slice::from_ref(&node),
+            data,
+            &mut buf,
+            true,
+            &mut Scratch::default(),
+        );
         sort_dedup(&mut buf);
         out.extend(buf);
     }
@@ -194,7 +211,14 @@ impl Path {
     ///
     /// `reverse` flips edge direction throughout, which is how `sh:inversePath`
     /// over a compound path is handled without a second evaluator.
-    fn expand(&self, input: &[TermId], data: &Graph, out: &mut Vec<TermId>, reverse: bool) {
+    fn expand(
+        &self,
+        input: &[TermId],
+        data: &Graph,
+        out: &mut Vec<TermId>,
+        reverse: bool,
+        scratch: &mut Scratch,
+    ) {
         match self {
             Path::Predicate(p) => {
                 for &n in input {
@@ -205,12 +229,14 @@ impl Path {
                     }
                 }
             }
-            Path::Inverse(inner) => inner.expand(input, data, out, !reverse),
+            Path::Inverse(inner) => inner.expand(input, data, out, !reverse, scratch),
             Path::Sequence(steps) => {
                 // Carry the whole frontier between steps. Reversed, the
                 // sequence itself is also walked back to front.
-                let mut frontier = input.to_vec();
-                let mut next = Vec::new();
+                let mut frontier = scratch.take();
+                let mut next = scratch.take();
+                frontier.extend_from_slice(input);
+
                 let ordered: Box<dyn Iterator<Item = &Path>> = if reverse {
                     Box::new(steps.iter().rev())
                 } else {
@@ -218,28 +244,30 @@ impl Path {
                 };
                 for step in ordered {
                     next.clear();
-                    step.expand(&frontier, data, &mut next, reverse);
+                    step.expand(&frontier, data, &mut next, reverse, scratch);
                     sort_dedup(&mut next);
                     std::mem::swap(&mut frontier, &mut next);
                     if frontier.is_empty() {
-                        return;
+                        break;
                     }
                 }
-                out.extend(frontier);
+                out.extend_from_slice(&frontier);
+                scratch.give(frontier);
+                scratch.give(next);
             }
             Path::Alternative(alts) => {
                 for alt in alts {
-                    alt.expand(input, data, out, reverse);
+                    alt.expand(input, data, out, reverse, scratch);
                 }
             }
             Path::ZeroOrMore(inner) => {
                 out.extend_from_slice(input);
-                inner.closure(input, data, out, reverse);
+                inner.closure(input, data, out, reverse, scratch);
             }
-            Path::OneOrMore(inner) => inner.closure(input, data, out, reverse),
+            Path::OneOrMore(inner) => inner.closure(input, data, out, reverse, scratch),
             Path::ZeroOrOne(inner) => {
                 out.extend_from_slice(input);
-                inner.expand(input, data, out, reverse);
+                inner.expand(input, data, out, reverse, scratch);
             }
         }
     }
@@ -250,26 +278,60 @@ impl Path {
     /// traversal per focus node shares the overlapping work between them, and
     /// bounds the round count by the graph's depth rather than by the number of
     /// focus nodes.
-    fn closure(&self, input: &[TermId], data: &Graph, out: &mut Vec<TermId>, reverse: bool) {
-        let mut frontier = input.to_vec();
-        let mut seen: Vec<TermId> = Vec::new();
-        let mut next = Vec::new();
+    fn closure(
+        &self,
+        input: &[TermId],
+        data: &Graph,
+        out: &mut Vec<TermId>,
+        reverse: bool,
+        scratch: &mut Scratch,
+    ) {
+        let mut frontier = scratch.take();
+        let mut seen = scratch.take();
+        let mut next = scratch.take();
+        frontier.extend_from_slice(input);
 
         while !frontier.is_empty() {
             next.clear();
-            self.expand(&frontier, data, &mut next, reverse);
+            self.expand(&frontier, data, &mut next, reverse, scratch);
             sort_dedup(&mut next);
             // Drop anything already expanded, which is what terminates on a
             // cyclic graph.
             next.retain(|n| seen.binary_search(n).is_err());
             if next.is_empty() {
-                return;
+                break;
             }
             out.extend_from_slice(&next);
             seen.extend_from_slice(&next);
             sort_dedup(&mut seen);
             std::mem::swap(&mut frontier, &mut next);
         }
+        scratch.give(frontier);
+        scratch.give(seen);
+        scratch.give(next);
+    }
+}
+
+/// A pool of reusable buffers for compound path evaluation.
+///
+/// Path evaluation runs once per focus node, so anything allocated inside it is
+/// allocated hundreds of thousands of times over a large graph. Buffers are
+/// borrowed and returned instead, keeping their capacity across rows.
+#[derive(Debug, Default)]
+struct Scratch {
+    free: Vec<Vec<TermId>>,
+}
+
+impl Scratch {
+    #[inline]
+    fn take(&mut self) -> Vec<TermId> {
+        self.free.pop().unwrap_or_default()
+    }
+
+    #[inline]
+    fn give(&mut self, mut buf: Vec<TermId>) {
+        buf.clear();
+        self.free.push(buf);
     }
 }
 

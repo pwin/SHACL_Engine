@@ -70,14 +70,47 @@ changes that would actually shift these numbers are a conformance-only path that
 skips building a report at all, and parse throughput.
 
 **Validation scales superlinearly, and it should not.** Each 10× increase in
-data costs about 16–17× in validation time (1.0ms → 17ms → 268ms), where focus
-nodes are independent and the work ought to be close to linear. Some of that is
-the `n log n` in sorting and deduplicating focus nodes, but not all of it; the
-rest is most likely cache behaviour, since at 690k triples the three sorted
-indexes total roughly 25MB and each binary search becomes a chain of misses.
-This has not been profiled yet — it is a measurement, not a diagnosis — but it
-is the first thing to look at, because it is the term that decides how the
-engine behaves on graphs larger than these.
+data costs about 16–17× in validation time, where focus nodes are independent
+and the work ought to be close to linear.
+
+`cargo run --release --example profile -- <data> <shapes>` breaks this down, and
+the cause is **probe locality**, not the amount of work:
+
+| | sorted probes | random probes | penalty |
+| --- | ---: | ---: | ---: |
+| 10,000 instances (69k triples) | 73 ns | 119 ns | 1.6× |
+| 100,000 instances (690k triples) | 85 ns | 277 ns | 3.3× |
+
+Probing the index in sorted order is nearly flat across a 10× size increase —
+73ns to 85ns — because consecutive binary searches share cache lines. Probing in
+scrambled order degrades 2.3×, and the *penalty itself* grows with size as the
+three sorted indexes outgrow cache at roughly 25MB.
+
+That is why the sequence path `( ex:knows ex:name )` is the worst offender,
+taking 73% of path evaluation at 100k and scaling ~25× per 10× of data. Its
+first step probes focus nodes in sorted order and behaves well; its second step
+probes whatever the first step reached, which bears no relation to index order.
+
+### The fix this points to
+
+Evaluate compound paths **across all focus nodes at once** rather than one focus
+node at a time, as a sort-merge join:
+
+1. probe step one over the sorted focus set, producing `(focus, mid)` pairs
+2. **sort by `mid`**
+3. probe step two over those in sorted order
+4. join back on `mid` and regroup by focus
+
+That converts the second step's random probes into sequential ones, which the
+table above prices at 3.3× and rising. It is squarely what the CSR relation was
+introduced for: `eval_sets` already receives the whole focus set, so the
+intermediate frontier is there to be sorted globally — the current
+implementation just does not use it, evaluating row by row and never seeing more
+than a handful of intermediate nodes at a time.
+
+Pooling the working buffers instead of allocating per focus node is already
+done, and was worth about 10% — allocation was a real cost but a minor one next
+to locality.
 
 This is also a workload that favours a compiled engine: a small shapes graph,
 many focus nodes, and cheap constraints. Shapes dominated by SPARQL constraints
