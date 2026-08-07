@@ -47,14 +47,19 @@ Ryzen/Windows 11, release build (`lto = "fat"`, `codegen-units = 1`), best of 3.
 
 | instances | triples | results | ours | pySHACL | speedup | ours: validate only |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 6,914 | 88 | 0.021s | 1.127s | **53×** | 0.0010s |
-| 10,000 | 69,027 | 997 | 0.118s | 7.262s | **61×** | 0.0170s |
-| 100,000 | 689,861 | 10,179 | 1.363s | 78.821s | **58×** | 0.2680s |
+| 1,000 | 6,914 | 88 | 0.021s | 1.369s | **64×** | 0.0010s |
+| 10,000 | 69,027 | 997 | 0.146s | 8.412s | **58×** | 0.0120s |
+| 100,000 | 689,861 | 10,179 | 1.422s | 81.654s | **57×** | 0.1520s |
 
 Both engines report identical result counts at every size.
 
-At the largest size that is ~506k triples/second end to end, or ~2.6M
-triples/second through the validator alone, against ~8.8k/second for pySHACL.
+At the largest size that is ~485k triples/second end to end, or ~4.5M
+triples/second through the validator alone, against ~8.4k/second for pySHACL.
+
+Run the benchmark with nothing else on the machine. An earlier run taken while
+a compile was in progress inflated the 100k end-to-end figure by 70% while
+leaving the validate-only figure alone — the parse phase is what picks up the
+contention.
 
 ## Reading these numbers
 
@@ -69,12 +74,14 @@ a fifth of the runtime, so halving it would move the total by a tenth. The two
 changes that would actually shift these numbers are a conformance-only path that
 skips building a report at all, and parse throughput.
 
-**Validation scales superlinearly, and it should not.** Each 10× increase in
-data costs about 16–17× in validation time, where focus nodes are independent
-and the work ought to be close to linear.
+**Validation used to scale superlinearly**, at about 16–17× per 10× of data.
+It is now 12.0× and 12.7×, and validation at 100k dropped from 0.268s to
+0.152s. Two changes got it there, both found by profiling rather than guessed
+at, and both attacking the same underlying cause.
 
-`cargo run --release --example profile -- <data> <shapes>` breaks this down, and
-the cause is **probe locality**, not the amount of work:
+`cargo run --release --example profile -- <data> <shapes>` breaks the run down
+by phase and by constraint. What it showed was **probe locality**, not the
+amount of work:
 
 | | sorted probes | random probes | penalty |
 | --- | ---: | ---: | ---: |
@@ -91,26 +98,36 @@ taking 73% of path evaluation at 100k and scaling ~25× per 10× of data. Its
 first step probes focus nodes in sorted order and behaves well; its second step
 probes whatever the first step reached, which bears no relation to index order.
 
-### The fix this points to
+### What was done about it
 
-Evaluate compound paths **across all focus nodes at once** rather than one focus
-node at a time, as a sort-merge join:
+**Compound paths evaluate as a batched sort-merge join.** The traversal state is
+a list of `(origin, reached)` pairs covering every focus node at once, so the
+whole frontier can be sorted between steps without losing track of which focus
+node a value belongs to. Each step probes in sorted node order, and origins that
+reached the same node share one probe. The sequence path went from 0.113s to
+0.043s at 100k, and from 25.6× to 14.7× per 10× of data.
 
-1. probe step one over the sorted focus set, producing `(focus, mid)` pairs
-2. **sort by `mid`**
-3. probe step two over those in sorted order
-4. join back on `mid` and regroup by focus
+**`sh:class` tests against a materialised instance set.** It had become the
+largest single cost — 0.080s of 0.254s, 86% of all constraint checking —
+probing `rdf:type` once per value node, 300k times, each landing at a random
+offset in the index. Building the instance set once and testing membership by
+binary search moves that random access from an index too large for cache to an
+array of a few hundred kilobytes that stays resident.
 
-That converts the second step's random probes into sequential ones, which the
-table above prices at 3.3× and rising. It is squarely what the CSR relation was
-introduced for: `eval_sets` already receives the whole focus set, so the
-intermediate frontier is there to be sorted globally — the current
-implementation just does not use it, evaluating row by row and never seeing more
-than a handful of intermediate nodes at a time.
+Pooling the working buffers that compound paths allocated per focus node was
+also done, and was worth about 10% — allocation was real but minor beside
+locality.
 
-Pooling the working buffers instead of allocating per focus node is already
-done, and was worth about 10% — allocation was a real cost but a minor one next
-to locality.
+### Where the time goes now
+
+Parsing, overwhelmingly: 1.27s of the 1.42s at 100k, or 89%. Validation is
+0.152s of it, and roughly 60% of *that* is still path evaluation.
+
+So the next lever is the parser, not the validator. Within validation, the
+remaining candidates are a conformance-only path that skips building a report
+when the caller only wants a boolean, and parallelising across focus nodes,
+which are independent. Neither is likely to show up end to end until parsing
+improves.
 
 This is also a workload that favours a compiled engine: a small shapes graph,
 many focus nodes, and cheap constraints. Shapes dominated by SPARQL constraints
