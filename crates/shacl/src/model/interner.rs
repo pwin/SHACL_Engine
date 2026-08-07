@@ -7,6 +7,8 @@
 
 use std::hash::{BuildHasher, Hash, Hasher};
 
+use foldhash::fast::RandomState;
+
 use hashbrown::HashTable;
 
 /// A handle to an interned string. Cheap to copy, compare and hash.
@@ -14,7 +16,7 @@ use hashbrown::HashTable;
 pub struct StrId(pub(crate) u32);
 
 /// Append-only string arena with deduplication.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Interner {
     /// All interned bytes, concatenated. Never shrinks, so spans stay valid.
     buf: String,
@@ -23,7 +25,14 @@ pub struct Interner {
     /// Maps a string's hash to its `StrId`. Equality is resolved by looking the
     /// candidate back up in `buf`, which keeps this struct non-self-referential.
     table: HashTable<u32>,
-    hasher: std::hash::RandomState,
+    /// foldhash rather than the default SipHash. Interning is dominated by
+    /// hashing short strings — two million of them on a large graph — and
+    /// SipHash costs about 17% of load for quality this does not need.
+    ///
+    /// The seed is still randomised per process. A validator may be handed RDF
+    /// from anywhere, and a fixed-seed hash would let a crafted document
+    /// collide every IRI into one bucket and turn interning quadratic.
+    hasher: RandomState,
 }
 
 impl Interner {
@@ -90,7 +99,7 @@ impl Interner {
 }
 
 #[inline]
-fn hash_str(hasher: &std::hash::RandomState, s: &str) -> u64 {
+fn hash_str(hasher: &RandomState, s: &str) -> u64 {
     let mut h = hasher.build_hasher();
     s.hash(&mut h);
     h.finish()

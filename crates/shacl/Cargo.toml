@@ -16,6 +16,7 @@ spareval.workspace = true
 rayon.workspace = true
 hashbrown.workspace = true
 regex.workspace = true
+foldhash = "0.2"
 
 
 [dev-dependencies]

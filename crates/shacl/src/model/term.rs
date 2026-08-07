@@ -69,11 +69,24 @@ pub enum TermKind {
 }
 
 /// Interner for RDF terms, shared across every graph in a validation run.
-#[derive(Debug)]
 pub struct TermStore {
     strings: Interner,
     terms: Vec<TermData>,
+    /// Deduplication for terms whose identity is not a bare string. Named and
+    /// blank nodes bypass it entirely — see `named_of`/`blank_of`.
     lookup: hashbrown::HashMap<TermData, TermId>,
+    /// `TermId` of the named node for each interned string, or `NONE`.
+    ///
+    /// Interning a term used to cost two hash lookups: one to intern its
+    /// string, one to find the term built from it. For named and blank nodes
+    /// the string id already determines the term, so a direct array index
+    /// replaces the second lookup — and since these are the bulk of a graph's
+    /// terms, that is most of the hashing gone.
+    named_of: Vec<u32>,
+    /// The same, for blank nodes. Kept separate because a scoped blank node
+    /// label and an IRI can never be the same string, but the two term kinds
+    /// still need distinct ids.
+    blank_of: Vec<u32>,
     /// Subject/predicate/object of each RDF 1.2 triple term.
     triple_terms: Vec<[TermId; 3]>,
     /// Scratch buffer for scoping blank node labels without allocating.
@@ -92,9 +105,47 @@ impl TermStore {
             strings: Interner::new(),
             terms: Vec::new(),
             lookup: hashbrown::HashMap::new(),
+            named_of: Vec::new(),
+            blank_of: Vec::new(),
             triple_terms: Vec::new(),
             scratch: String::new(),
         }
+    }
+
+    /// Sentinel for "no term built from this string yet".
+    const NONE: u32 = u32::MAX;
+
+    /// Looks up, or creates, the term of one kind built from string `s`.
+    #[inline]
+    fn by_string(&mut self, s: StrId, blank: bool) -> TermId {
+        let table = if blank {
+            &mut self.blank_of
+        } else {
+            &mut self.named_of
+        };
+        let idx = s.0 as usize;
+        if idx >= table.len() {
+            table.resize(idx + 1, Self::NONE);
+        }
+        if table[idx] != Self::NONE {
+            return TermId(table[idx]);
+        }
+        let data = if blank {
+            TermData::BlankNode(s)
+        } else {
+            TermData::NamedNode(s)
+        };
+        let id = TermId(self.terms.len() as u32);
+        self.terms.push(data);
+        // Deliberately not inserted into `lookup`: the array above is the
+        // index for these, and a second copy would cost the hash it saves.
+        let table = if blank {
+            &mut self.blank_of
+        } else {
+            &mut self.named_of
+        };
+        table[idx] = id.0;
+        id
     }
 
     fn push(&mut self, data: TermData) -> TermId {
@@ -109,7 +160,7 @@ impl TermStore {
 
     pub fn named_node(&mut self, iri: &str) -> TermId {
         let s = self.strings.intern(iri);
-        self.push(TermData::NamedNode(s))
+        self.by_string(s, false)
     }
 
     /// Interns a blank node, scoping its label to `scope`.
@@ -129,7 +180,7 @@ impl TermStore {
             } = self;
             strings.intern(scratch)
         };
-        self.push(TermData::BlankNode(s))
+        self.by_string(s, true)
     }
 
     pub fn literal(&mut self, lex: &str, datatype: &str, lang: Option<&str>) -> TermId {
@@ -272,7 +323,10 @@ impl TermStore {
     /// Looks up an already-interned IRI without growing the store.
     pub fn get_named_node(&self, iri: &str) -> Option<TermId> {
         let s = self.strings.get(iri)?;
-        self.lookup.get(&TermData::NamedNode(s)).copied()
+        match self.named_of.get(s.0 as usize) {
+            Some(&id) if id != Self::NONE => Some(TermId(id)),
+            _ => None,
+        }
     }
 
     /// Looks up any already-interned term without growing the store.
@@ -282,7 +336,8 @@ impl TermStore {
     /// rather than as an error.
     pub fn get_term(&self, term: TermRef<'_>) -> Option<TermId> {
         let data = match term {
-            TermRef::NamedNode(n) => TermData::NamedNode(self.strings.get(n.as_str())?),
+            // Named nodes are indexed by string id, not by `lookup`.
+            TermRef::NamedNode(n) => return self.get_named_node(n.as_str()),
             TermRef::BlankNode(_) => {
                 // Blank node labels are scope-prefixed on the way in, so an
                 // externally-supplied label has no meaningful identity here.
