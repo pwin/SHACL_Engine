@@ -33,7 +33,7 @@ sequence. Expected and actual reports are compared through one in-memory
 representation rather than by diffing serialised RDF; `sh:resultMessage` is
 excluded, since the spec leaves message text to the implementation.
 
-**299 of 426** tests pass. The remainder are node expressions: the `shnex-sparql`
+**383 of 426** tests pass. The remainder are node expressions: the `shnex-sparql`
 group, which exposes the SPARQL function library as node expressions, is not
 implemented, and parts of the `shnex` algebra are still missing.
 

@@ -159,6 +159,23 @@ fn run_node_expr(
     };
     let focus = manifest.object(action, focus_p);
 
+    // Variables reach the expression as `sht:scope-<name>` on the action.
+    let scope_prefix = format!("{}scope-", shacl::model::vocab::SHT);
+    let vars: Vec<(String, TermId)> = manifest
+        .predicate_objects(action)
+        .filter_map(|(p, o)| {
+            let name = store.iri(p)?.strip_prefix(&scope_prefix)?.to_string();
+            Some((name, o))
+        })
+        .collect();
+
+    // Some entries only fix the *set* of results, not their order.
+    let ignore_order_p = store.named_node(&format!("{}ignoreOrder", shacl::model::vocab::SHT));
+    let ignore_order = manifest
+        .object(action, ignore_order_p)
+        .and_then(|t| store.lexical_form(t))
+        .is_some_and(|v| v == "true");
+
     let expected: Vec<TermId> = match manifest.object(entry, vocab.mf_result) {
         Some(head) => match manifest.list(head, vocab) {
             Some(items) => items,
@@ -167,12 +184,18 @@ fn run_node_expr(
         None => return Status::Error("entry has no mf:result".into()),
     };
 
+    // Shape-valued operators validate against shapes declared in the same
+    // document as the expression.
+    let shapes = shacl::shapes::Shapes::compile(manifest, store, vocab).ok();
+
     let actual = {
         let ctx = shacl::nodeexpr::Ctx {
             data: manifest,
             exprs: manifest,
             vocab,
             shnex,
+            shapes: shapes.as_ref(),
+            vars: &vars,
         };
         match shacl::nodeexpr::eval(expr, focus, &ctx, store) {
             Ok(v) => v,
@@ -180,7 +203,15 @@ fn run_node_expr(
         }
     };
 
-    if actual == expected {
+    let matches = if ignore_order {
+        let (mut a, mut b) = (actual.clone(), expected.clone());
+        a.sort_unstable();
+        b.sort_unstable();
+        a == b
+    } else {
+        actual == expected
+    };
+    if matches {
         return Status::Pass;
     }
     let show = |ts: &[TermId], store: &TermStore| {
@@ -458,7 +489,7 @@ fn w3c_test_suites() {
 
 /// Guards against regressions: the pass count must never drop below this.
 /// Raise it as the engine gains coverage.
-const BASELINE_PASSING: usize = 364;
+const BASELINE_PASSING: usize = 383;
 
 #[test]
 fn progress() {

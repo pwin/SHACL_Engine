@@ -52,6 +52,13 @@ shnex_vocab! {
     instances_of = "instancesOf",
     order_by = "orderBy",
     desc = "desc",
+    var = "var",
+    flat_map = "flatMap",
+    find_first = "findFirst",
+    conforms_to_shape = "conformsToShape",
+    filter_shape = "filterShape",
+    nodes_matching = "nodesMatching",
+    match_all = "matchAll",
     }
 }
 
@@ -63,6 +70,11 @@ pub struct Ctx<'a> {
     pub exprs: &'a Graph,
     pub vocab: &'a Vocab,
     pub shnex: &'a Shnex,
+    /// The compiled shapes that shape-valued operators test against. `None`
+    /// makes every shape vacuously satisfied.
+    pub shapes: Option<&'a crate::shapes::Shapes>,
+    /// Variable bindings visible to `shnex:var`, beyond `focusNode`.
+    pub vars: &'a [(String, TermId)],
 }
 
 /// Evaluates the node expression at `node` for `focus`.
@@ -246,6 +258,96 @@ fn eval_at(
         return Ok(values);
     }
 
+    if let Some(name) = g.object(node, s.var) {
+        let name = store.lexical_form(name).unwrap_or_default().to_string();
+        // `focusNode` is always in scope; everything else comes from the
+        // surrounding bindings.
+        if name == "focusNode" {
+            return Ok(focus.into_iter().collect());
+        }
+        return Ok(ctx
+            .vars
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, t)| *t)
+            .into_iter()
+            .collect());
+    }
+
+    if let Some(body) = g.object(node, s.flat_map) {
+        // Each input node becomes the focus for one evaluation of the body,
+        // and the results are concatenated.
+        let inputs = operand!();
+        let mut out = Vec::new();
+        for input in inputs {
+            out.extend(sub!(body, Some(input)));
+        }
+        return Ok(out);
+    }
+
+    // --- shape-valued operators
+    if let Some(args) = g.object(node, s.conforms_to_shape) {
+        let pair = g
+            .list(args, ctx.vocab)
+            .ok_or_else(|| Error::Shape("shnex:conformsToShape needs a list".into()))?;
+        let [node_expr, shape_expr] = pair.as_slice() else {
+            return Err(Error::Shape(
+                "shnex:conformsToShape takes a node and a shape".into(),
+            ));
+        };
+        let nodes = sub!(*node_expr, focus);
+        let shapes = sub!(*shape_expr, focus);
+        let (Some(&n), Some(&sh)) = (nodes.first(), shapes.first()) else {
+            return Ok(Vec::new());
+        };
+        let ok = conforms(n, sh, ctx, store)?;
+        return Ok(vec![bool_literal(ok, store)]);
+    }
+
+    if let Some(shape) = g.object(node, s.filter_shape) {
+        let inputs = operand!();
+        let mut out = Vec::new();
+        for n in inputs {
+            if conforms(n, shape, ctx, store)? {
+                out.push(n);
+            }
+        }
+        return Ok(out);
+    }
+
+    if let Some(shape) = g.object(node, s.find_first) {
+        let inputs = operand!();
+        for n in inputs {
+            if conforms(n, shape, ctx, store)? {
+                return Ok(vec![n]);
+            }
+        }
+        return Ok(Vec::new());
+    }
+
+    if let Some(shape) = g.object(node, s.match_all) {
+        let inputs = operand!();
+        let mut all = true;
+        for n in inputs {
+            if !conforms(n, shape, ctx, store)? {
+                all = false;
+                break;
+            }
+        }
+        return Ok(vec![bool_literal(all, store)]);
+    }
+
+    if let Some(shape) = g.object(node, s.nodes_matching) {
+        // No operand: this ranges over every node in the data graph.
+        let mut out = Vec::new();
+        for n in all_nodes(ctx.data) {
+            if conforms(n, shape, ctx, store)? {
+                out.push(n);
+            }
+        }
+        return Ok(out);
+    }
+
     // `sparql:someFunction ( a b )` exposes the SPARQL function library as a
     // node expression. Rather than reimplementing sixty-odd builtins, the call
     // is rebuilt as a SPARQL expression and handed to the evaluator.
@@ -281,6 +383,30 @@ fn eval_at(
     }
 
     Err(Error::Shape("unsupported node expression".into()))
+}
+
+/// Whether `node` conforms to the shape declared at `shape`.
+fn conforms(node: TermId, shape: TermId, ctx: &Ctx<'_>, store: &TermStore) -> Result<bool> {
+    match ctx.shapes {
+        Some(shapes) => {
+            crate::validate::node_conforms(node, shape, ctx.data, shapes, store, ctx.vocab)
+        }
+        // Without compiled shapes there is nothing to violate.
+        None => Ok(true),
+    }
+}
+
+/// Every distinct term appearing anywhere in `g`, which is the universe
+/// `shnex:nodesMatching` ranges over.
+fn all_nodes(g: &Graph) -> Vec<TermId> {
+    let mut out = Vec::with_capacity(g.len() * 2);
+    for [s, _, o] in g.iter() {
+        out.push(s);
+        out.push(o);
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The `sparql:` namespace, whose predicates name SPARQL functions.
@@ -476,6 +602,8 @@ mod tests {
                 exprs: &self.graph,
                 vocab: &self.vocab,
                 shnex: &self.shnex,
+                shapes: None,
+                vars: &[],
             };
             let out = eval(node, focus, &ctx, &mut self.store)?;
             Ok(out
@@ -559,6 +687,55 @@ mod tests {
             "ex:E ex:expr [ shnex:offset 2 ; shnex:nodes [ shnex:pathValues ex:p ] ] . {data}"
         ));
         assert_eq!(f.eval(Some("http://ex/A")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn var_reads_the_focus_node_and_bound_variables() {
+        let mut f = F::new("ex:E ex:expr [ shnex:var \"focusNode\" ] .");
+        assert_eq!(f.eval(Some("http://ex/A")).unwrap(), vec!["http://ex/A"]);
+
+        let mut f = F::new("ex:E ex:expr [ shnex:var \"absent\" ] .");
+        assert!(f.eval(Some("http://ex/A")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn flat_map_rebinds_the_focus_node_per_input() {
+        // Each input becomes the focus for one evaluation of the body, which
+        // is what makes shnex:var "focusNode" inside it useful.
+        let mut f = F::new(
+            "ex:E ex:expr [ shnex:nodes ( ex:A ex:B ) ;
+                            shnex:flatMap [ shnex:pathValues ex:p ] ] .
+             ex:A ex:p \"a\" . ex:B ex:p \"b\" .",
+        );
+        assert_eq!(f.eval(None).unwrap(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn sparql_calls_reach_the_function_library() {
+        let mut f = F::new(
+            "@prefix sparql: <http://www.w3.org/ns/sparql#> .
+             ex:E ex:expr [ sparql:abs ( -42 ) ] .",
+        );
+        assert_eq!(f.eval(None).unwrap(), vec!["42"]);
+    }
+
+    #[test]
+    fn sparql_operators_are_emitted_as_syntax() {
+        // `greater-than` is named like a function but has no call form.
+        let mut f = F::new(
+            "@prefix sparql: <http://www.w3.org/ns/sparql#> .
+             ex:E ex:expr [ sparql:greater-than ( 10 5 ) ] .",
+        );
+        assert_eq!(f.eval(None).unwrap(), vec!["true"]);
+    }
+
+    #[test]
+    fn a_sparql_call_with_no_argument_value_is_empty() {
+        let mut f = F::new(
+            "@prefix sparql: <http://www.w3.org/ns/sparql#> .
+             ex:E ex:expr [ sparql:abs ( [ shnex:var \"absent\" ] ) ] .",
+        );
+        assert!(f.eval(None).unwrap().is_empty());
     }
 
     #[test]

@@ -53,6 +53,32 @@ pub fn validate_with(
     Ok(ValidationReport { results })
 }
 
+/// Whether `node` conforms to the shape declared at `shape_node`.
+///
+/// Exposed for node expressions, whose shape-valued operators — `shnex:
+/// conformsToShape`, `filterShape`, `matchAll`, `findFirst` — all reduce to
+/// this question.
+pub fn node_conforms(
+    node: TermId,
+    shape_node: TermId,
+    data: &Graph,
+    shapes: &Shapes,
+    store: &TermStore,
+    vocab: &Vocab,
+) -> Result<bool> {
+    let Some(id) = shapes.id_of(shape_node) else {
+        // A shape that declares no constraints constrains nothing.
+        return Ok(true);
+    };
+    let engine = Engine {
+        data,
+        shapes,
+        store,
+        vocab,
+    };
+    engine.conforms(id, node, &mut Vec::new())
+}
+
 struct Engine<'a> {
     data: &'a Graph,
     shapes: &'a Shapes,
