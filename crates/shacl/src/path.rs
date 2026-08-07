@@ -6,6 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::model::{Graph, TermId, TermStore, Vocab};
+use crate::valueset::{self, ValueSets};
 
 /// A compiled SHACL property path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,49 +106,63 @@ impl Path {
         }
     }
 
-    /// Appends the value nodes reachable from `focus` to `out`, deduplicated.
+    /// Evaluates this path from every focus node, producing the focus→values
+    /// relation.
     ///
-    /// SHACL treats value nodes as a set; `out` is left in first-reached order,
-    /// which keeps results deterministic for a given graph.
+    /// This is the engine's primary entry point. Rows stay indexed by the
+    /// originating focus node so per-row aggregates such as `sh:minCount`, and
+    /// the focus node every violation must name, survive a compound path.
+    pub fn eval_sets(&self, focus: &[TermId], data: &Graph) -> ValueSets {
+        let mut b = valueset::Builder::with_capacity(focus.len());
+        let mut scratch = Vec::new();
+        for &f in focus {
+            scratch.clear();
+            self.expand(std::slice::from_ref(&f), data, &mut scratch, false);
+            b.push_row(f, &scratch);
+        }
+        b.finish()
+    }
+
+    /// Appends the value nodes reachable from `focus` to `out`, deduplicated.
     pub fn eval(&self, focus: TermId, data: &Graph, out: &mut Vec<TermId>) {
-        let start = out.len();
-        self.eval_into(focus, data, out, start, false);
+        let mut buf = Vec::new();
+        self.expand(std::slice::from_ref(&focus), data, &mut buf, false);
+        sort_dedup(&mut buf);
+        out.extend(buf);
     }
 
     /// Evaluates the path backwards: the nodes from which `node` is reachable.
     pub fn eval_inverse(&self, node: TermId, data: &Graph, out: &mut Vec<TermId>) {
-        let start = out.len();
-        self.eval_into(node, data, out, start, true);
+        let mut buf = Vec::new();
+        self.expand(std::slice::from_ref(&node), data, &mut buf, true);
+        sort_dedup(&mut buf);
+        out.extend(buf);
     }
 
-    /// Core traversal. `reverse` flips edge direction throughout, which is how
-    /// `sh:inversePath` over a compound path is handled without a second
-    /// evaluator.
-    fn eval_into(
-        &self,
-        focus: TermId,
-        data: &Graph,
-        out: &mut Vec<TermId>,
-        dedup_from: usize,
-        reverse: bool,
-    ) {
+    /// Expands a whole set of nodes through this path in one traversal.
+    ///
+    /// Set-to-set is the core primitive: a shape's focus nodes all follow the
+    /// same path, so the work is shared rather than repeated per node. `out` may
+    /// contain duplicates; callers deduplicate once at the end.
+    ///
+    /// `reverse` flips edge direction throughout, which is how `sh:inversePath`
+    /// over a compound path is handled without a second evaluator.
+    fn expand(&self, input: &[TermId], data: &Graph, out: &mut Vec<TermId>, reverse: bool) {
         match self {
             Path::Predicate(p) => {
-                if reverse {
-                    for s in data.subjects(*p, focus) {
-                        push_unique(out, dedup_from, s);
-                    }
-                } else {
-                    for o in data.objects(focus, *p) {
-                        push_unique(out, dedup_from, o);
+                for &n in input {
+                    if reverse {
+                        out.extend(data.subjects(*p, n));
+                    } else {
+                        out.extend(data.objects(n, *p));
                     }
                 }
             }
-            Path::Inverse(inner) => inner.eval_into(focus, data, out, dedup_from, !reverse),
+            Path::Inverse(inner) => inner.expand(input, data, out, !reverse),
             Path::Sequence(steps) => {
-                // Walk the steps in order, carrying the frontier between them.
-                // Reversed, the sequence itself must also be walked backwards.
-                let mut frontier = vec![focus];
+                // Carry the whole frontier between steps. Reversed, the
+                // sequence itself is also walked back to front.
+                let mut frontier = input.to_vec();
                 let mut next = Vec::new();
                 let ordered: Box<dyn Iterator<Item = &Path>> = if reverse {
                     Box::new(steps.iter().rev())
@@ -156,84 +171,65 @@ impl Path {
                 };
                 for step in ordered {
                     next.clear();
-                    for &node in &frontier {
-                        let base = next.len();
-                        let _ = base;
-                        step.eval_into(node, data, &mut next, 0, reverse);
-                    }
-                    dedup_in_place(&mut next);
+                    step.expand(&frontier, data, &mut next, reverse);
+                    sort_dedup(&mut next);
                     std::mem::swap(&mut frontier, &mut next);
+                    if frontier.is_empty() {
+                        return;
+                    }
                 }
-                for node in frontier {
-                    push_unique(out, dedup_from, node);
-                }
+                out.extend(frontier);
             }
             Path::Alternative(alts) => {
                 for alt in alts {
-                    alt.eval_into(focus, data, out, dedup_from, reverse);
+                    alt.expand(input, data, out, reverse);
                 }
             }
             Path::ZeroOrMore(inner) => {
-                push_unique(out, dedup_from, focus);
-                inner.closure(focus, data, out, dedup_from, reverse);
+                out.extend_from_slice(input);
+                inner.closure(input, data, out, reverse);
             }
-            Path::OneOrMore(inner) => {
-                inner.closure(focus, data, out, dedup_from, reverse);
-            }
+            Path::OneOrMore(inner) => inner.closure(input, data, out, reverse),
             Path::ZeroOrOne(inner) => {
-                push_unique(out, dedup_from, focus);
-                inner.eval_into(focus, data, out, dedup_from, reverse);
+                out.extend_from_slice(input);
+                inner.expand(input, data, out, reverse);
             }
         }
     }
 
-    /// Transitive closure of `self` from `focus`, excluding `focus` unless it is
-    /// genuinely reachable from itself via a cycle.
-    fn closure(
-        &self,
-        focus: TermId,
-        data: &Graph,
-        out: &mut Vec<TermId>,
-        dedup_from: usize,
-        reverse: bool,
-    ) {
-        // `seen` tracks expansion, kept separate from `out` because `out` may
-        // already contain unrelated results from a sibling alternative.
+    /// Transitive closure over the whole input set at once.
+    ///
+    /// Expanding the entire frontier per round rather than running a separate
+    /// traversal per focus node shares the overlapping work between them, and
+    /// bounds the round count by the graph's depth rather than by the number of
+    /// focus nodes.
+    fn closure(&self, input: &[TermId], data: &Graph, out: &mut Vec<TermId>, reverse: bool) {
+        let mut frontier = input.to_vec();
         let mut seen: Vec<TermId> = Vec::new();
-        let mut queue = vec![focus];
-        let mut step = Vec::new();
+        let mut next = Vec::new();
 
-        while let Some(node) = queue.pop() {
-            step.clear();
-            self.eval_into(node, data, &mut step, 0, reverse);
-            for &next in &step {
-                if seen.contains(&next) {
-                    continue;
-                }
-                seen.push(next);
-                queue.push(next);
-                push_unique(out, dedup_from, next);
+        while !frontier.is_empty() {
+            next.clear();
+            self.expand(&frontier, data, &mut next, reverse);
+            sort_dedup(&mut next);
+            // Drop anything already expanded, which is what terminates on a
+            // cyclic graph.
+            next.retain(|n| seen.binary_search(n).is_err());
+            if next.is_empty() {
+                return;
             }
+            out.extend_from_slice(&next);
+            seen.extend_from_slice(&next);
+            sort_dedup(&mut seen);
+            std::mem::swap(&mut frontier, &mut next);
         }
     }
 }
 
 #[inline]
-fn push_unique(out: &mut Vec<TermId>, from: usize, value: TermId) {
-    if !out[from..].contains(&value) {
-        out.push(value);
-    }
-}
-
-fn dedup_in_place(v: &mut Vec<TermId>) {
-    let mut i = 0;
-    while i < v.len() {
-        if v[..i].contains(&v[i]) {
-            v.remove(i);
-        } else {
-            i += 1;
-        }
-    }
+fn sort_dedup(v: &mut Vec<TermId>) {
+    v.sort_unstable();
+    v.dedup();
 }
 
 #[cfg(test)]
@@ -273,12 +269,37 @@ mod tests {
             Path::compile(node, &self.graph, &self.store, &self.vocab)
         }
 
+        /// Value nodes as sorted strings. Value nodes are a set, so the
+        /// evaluator makes no ordering promise.
         fn eval(&mut self, path: &Path, focus: &str) -> Vec<String> {
             let f = self.iri(focus);
             let mut out = Vec::new();
             path.eval(f, &self.graph, &mut out);
-            out.iter()
+            let mut v: Vec<String> = out
+                .iter()
                 .map(|&t| self.store.lexical_form(t).unwrap_or("?").to_string())
+                .collect();
+            v.sort();
+            v
+        }
+
+        /// The full focus→values relation, as sorted strings per row.
+        fn eval_sets(&mut self, path: &Path, focus: &[&str]) -> Vec<(String, Vec<String>)> {
+            let ids: Vec<TermId> = focus.iter().map(|f| self.store.named_node(f)).collect();
+            let sets = path.eval_sets(&ids, &self.graph);
+            sets.rows()
+                .map(|r| {
+                    let mut vs: Vec<String> = r
+                        .values
+                        .iter()
+                        .map(|&t| self.store.lexical_form(t).unwrap_or("?").to_string())
+                        .collect();
+                    vs.sort();
+                    (
+                        self.store.lexical_form(r.focus).unwrap_or("?").to_string(),
+                        vs,
+                    )
+                })
                 .collect()
         }
     }
@@ -372,6 +393,49 @@ mod tests {
         ));
         let p = f.path().unwrap();
         assert_eq!(f.eval(&p, "http://ex/z"), vec!["http://ex/a"]);
+    }
+
+    #[test]
+    fn eval_sets_keeps_values_attributed_to_their_focus_node() {
+        // The property that makes this usable for sh:minCount and for naming a
+        // violation's focus node: rows must not merge.
+        let mut f = Fixture::new(&format!(
+            "{PREFIX} ex:S sh:path ex:p .
+             ex:a ex:p ex:x, ex:y . ex:b ex:p ex:y . ex:c ex:q ex:z ."
+        ));
+        let p = f.path().unwrap();
+        let rows = f.eval_sets(&p, &["http://ex/a", "http://ex/b", "http://ex/c"]);
+
+        assert_eq!(
+            rows,
+            vec![
+                ("http://ex/a".into(), vec!["http://ex/x".into(), "http://ex/y".into()]),
+                ("http://ex/b".into(), vec!["http://ex/y".into()]),
+                ("http://ex/c".into(), vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn eval_sets_shares_a_closure_across_focus_nodes() {
+        // a -> b -> c -> d, and b is also a focus node. Both rows must be
+        // complete even though the traversals overlap.
+        let mut f = Fixture::new(&format!(
+            "{PREFIX} ex:S sh:path [ sh:oneOrMorePath ex:p ] .
+             ex:a ex:p ex:b . ex:b ex:p ex:c . ex:c ex:p ex:d ."
+        ));
+        let p = f.path().unwrap();
+        let rows = f.eval_sets(&p, &["http://ex/a", "http://ex/b"]);
+
+        assert_eq!(rows[0].1, vec!["http://ex/b", "http://ex/c", "http://ex/d"]);
+        assert_eq!(rows[1].1, vec!["http://ex/c", "http://ex/d"]);
+    }
+
+    #[test]
+    fn eval_sets_on_no_focus_nodes_is_empty() {
+        let mut f = Fixture::new(&format!("{PREFIX} ex:S sh:path ex:p . ex:a ex:p ex:b ."));
+        let p = f.path().unwrap();
+        assert!(f.eval_sets(&p, &[]).is_empty());
     }
 
     #[test]

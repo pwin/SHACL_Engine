@@ -14,6 +14,7 @@ pub mod model;
 pub mod path;
 pub mod report;
 pub mod validate;
+pub mod valueset;
 
 pub use error::{Error, Result};
 pub use model::{Graph, GraphBuilder, TermId, TermStore, Vocab};
