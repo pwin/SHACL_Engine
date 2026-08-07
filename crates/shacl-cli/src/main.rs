@@ -82,11 +82,11 @@ fn run() -> Result<bool> {
     let compile_time = t1.elapsed();
 
     let t2 = Instant::now();
-    let mut report = shacl::validate::validate_with(&data, &compiled, &store, &vocab)?;
+    let mut report = shacl::validate::validate_in(&data, &compiled, shapes_ref, &mut store, &vocab)?;
     let mut best = t2.elapsed();
     for _ in 1..args.repeat {
         let t = Instant::now();
-        report = shacl::validate::validate_with(&data, &compiled, &store, &vocab)?;
+        report = shacl::validate::validate_in(&data, &compiled, shapes_ref, &mut store, &vocab)?;
         best = best.min(t.elapsed());
     }
 

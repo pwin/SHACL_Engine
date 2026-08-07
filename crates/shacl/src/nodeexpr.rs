@@ -458,7 +458,7 @@ fn eval_at(
 }
 
 /// Whether `node` conforms to the shape declared at `shape`.
-fn conforms(node: TermId, shape: TermId, ctx: &Ctx<'_>, store: &TermStore) -> Result<bool> {
+fn conforms(node: TermId, shape: TermId, ctx: &Ctx<'_>, store: &mut TermStore) -> Result<bool> {
     match ctx.shapes {
         Some(shapes) => {
             crate::validate::node_conforms(node, shape, ctx.data, shapes, store, ctx.vocab)

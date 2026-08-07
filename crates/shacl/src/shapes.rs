@@ -142,6 +142,13 @@ pub enum Constraint {
 
     /// An instance of a user-declared constraint component.
     Custom(Box<CustomConstraint>),
+
+    /// `sh:expression`: a node expression that must evaluate to `true` for
+    /// each focus node.
+    Expression(TermId),
+    /// `sh:nodeByExpression`: like `sh:node`, but the shape to conform to is
+    /// whatever a node expression yields.
+    NodeByExpression(TermId),
 }
 
 /// One shape's use of a user-declared constraint component.
@@ -202,6 +209,8 @@ impl Constraint {
             Self::UniqueValuesFor(_) => v.sh_UniqueValuesForConstraintComponent,
             Self::Sparql(_) => v.sh_SPARQLConstraintComponent,
             Self::Custom(c) => c.component,
+            Self::Expression(_) => v.sh_ExpressionConstraintComponent,
+            Self::NodeByExpression(_) => v.sh_NodeByExpressionConstraintComponent,
         }
     }
 
@@ -689,6 +698,14 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::Sparql(Box::new(
                 self.compile_sparql(node_c, path)?,
             )));
+        }
+
+        // --- node expressions
+        for t in g.objects(node, v.sh_expression) {
+            out.push(Constraint::Expression(t));
+        }
+        for t in g.objects(node, v.sh_nodeByExpression) {
+            out.push(Constraint::NodeByExpression(t));
         }
 
         // --- user-declared constraint components

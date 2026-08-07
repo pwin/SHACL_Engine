@@ -25,7 +25,7 @@ pub fn validate(
     vocab: &Vocab,
 ) -> Result<ValidationReport> {
     let shapes = Shapes::compile(shapes_graph, store, vocab)?;
-    validate_with(data, &shapes, store, vocab)
+    validate_in(data, &shapes, shapes_graph, store, vocab)
 }
 
 /// Validates against an already-compiled shapes graph.
@@ -35,20 +35,35 @@ pub fn validate(
 pub fn validate_with(
     data: &Graph,
     shapes: &Shapes,
-    store: &TermStore,
+    store: &mut TermStore,
+    vocab: &Vocab,
+) -> Result<ValidationReport> {
+    validate_in(data, shapes, data, store, vocab)
+}
+
+/// Validates, naming the graph the shapes were compiled from.
+///
+/// Node expressions are written in the shapes graph, so evaluating
+/// `sh:expression` needs it as well as the compiled form.
+pub fn validate_in(
+    data: &Graph,
+    shapes: &Shapes,
+    shapes_graph: &Graph,
+    store: &mut TermStore,
     vocab: &Vocab,
 ) -> Result<ValidationReport> {
     let engine = Engine {
         data,
         shapes,
-        store,
+        shapes_graph,
         vocab,
+        shnex: crate::nodeexpr::Shnex::new(store),
     };
     let mut results = Vec::new();
     let mut stack = Vec::new();
     for &root in shapes.roots() {
-        let focus = engine.focus_nodes(shapes.get(root));
-        engine.validate_shape(root, &focus, &mut results, &mut stack)?;
+        let focus = engine.focus_nodes(shapes.get(root), store);
+        engine.validate_shape(root, &focus, &mut results, &mut stack, store)?;
     }
     Ok(ValidationReport { results })
 }
@@ -63,7 +78,7 @@ pub fn node_conforms(
     shape_node: TermId,
     data: &Graph,
     shapes: &Shapes,
-    store: &TermStore,
+    store: &mut TermStore,
     vocab: &Vocab,
 ) -> Result<bool> {
     let Some(id) = shapes.id_of(shape_node) else {
@@ -73,17 +88,20 @@ pub fn node_conforms(
     let engine = Engine {
         data,
         shapes,
-        store,
+        shapes_graph: data,
         vocab,
+        shnex: crate::nodeexpr::Shnex::new(store),
     };
-    engine.conforms(id, node, &mut Vec::new())
+    engine.conforms(id, node, &mut Vec::new(), store)
 }
 
 struct Engine<'a> {
     data: &'a Graph,
     shapes: &'a Shapes,
-    store: &'a TermStore,
+    /// The shapes graph itself, which node expressions are written in.
+    shapes_graph: &'a Graph,
     vocab: &'a Vocab,
+    shnex: crate::nodeexpr::Shnex,
 }
 
 /// Shape/node pairs currently being validated, used to break recursion.
@@ -92,7 +110,7 @@ type Stack = Vec<(ShapeId, TermId)>;
 impl Engine<'_> {
     // ------------------------------------------------------------- targeting
 
-    fn focus_nodes(&self, shape: &Shape) -> Vec<TermId> {
+    fn focus_nodes(&self, shape: &Shape, _store: &TermStore) -> Vec<TermId> {
         let mut out = Vec::new();
         for target in &shape.targets {
             match target {
@@ -146,6 +164,7 @@ impl Engine<'_> {
         focus: &[TermId],
         out: &mut Vec<ValidationResult>,
         stack: &mut Stack,
+        store: &mut TermStore,
     ) -> Result<()> {
         let shape = self.shapes.get(id);
         if shape.deactivated || focus.is_empty() {
@@ -156,13 +175,13 @@ impl Engine<'_> {
             None => ValueSets::identity(focus),
         };
         for constraint in &shape.constraints {
-            self.eval(shape, constraint, &sets, out, stack)?;
+            self.eval(shape, constraint, &sets, out, stack, store)?;
         }
         Ok(())
     }
 
     /// Whether `node` conforms to the shape, producing no results.
-    fn conforms(&self, id: ShapeId, node: TermId, stack: &mut Stack) -> Result<bool> {
+    fn conforms(&self, id: ShapeId, node: TermId, stack: &mut Stack, store: &mut TermStore) -> Result<bool> {
         // A shapes graph may be recursive. The spec leaves recursion
         // undefined, so treat a repeat visit as conforming rather than
         // diverging.
@@ -171,7 +190,7 @@ impl Engine<'_> {
         }
         stack.push((id, node));
         let mut scratch = Vec::new();
-        let outcome = self.validate_shape(id, &[node], &mut scratch, stack);
+        let outcome = self.validate_shape(id, &[node], &mut scratch, stack, store);
         stack.pop();
         outcome?;
         Ok(scratch.is_empty())
@@ -195,6 +214,7 @@ impl Engine<'_> {
         sets: &ValueSets,
         out: &mut Vec<ValidationResult>,
         stack: &mut Stack,
+        store: &mut TermStore,
     ) -> Result<()> {
         let v = self.vocab;
         let component = c.component(v);
@@ -234,16 +254,16 @@ impl Engine<'_> {
             }
             Constraint::Datatype(dts) => per_value!(|value| {
                 dts.iter().any(|&dt| {
-                    self.store.datatype(value) == Some(dt)
+                    store.datatype(value) == Some(dt)
                         && datatypes::is_well_formed(
-                            self.store.lexical_form(value).unwrap_or_default(),
+                            store.lexical_form(value).unwrap_or_default(),
                             dt,
                             v,
                         )
                 })
             }),
             Constraint::NodeKind(kinds) => per_value!(|value| {
-                let kind = self.store.kind(value);
+                let kind = store.kind(value);
                 kinds.iter().any(|&k| node_kind_matches(kind, k))
             }),
 
@@ -265,32 +285,31 @@ impl Engine<'_> {
 
             // --- value range
             Constraint::MinExclusive(b) => {
-                per_value!(|value| self.cmp_is(value, *b, &[Ordering::Greater]))
+                per_value!(|value| self.cmp_is(value, *b, &[Ordering::Greater], store))
             }
             Constraint::MinInclusive(b) => {
-                per_value!(|value| self.cmp_is(value, *b, &[Ordering::Greater, Ordering::Equal]))
+                per_value!(|value| self.cmp_is(value, *b, &[Ordering::Greater, Ordering::Equal], store))
             }
             Constraint::MaxExclusive(b) => {
-                per_value!(|value| self.cmp_is(value, *b, &[Ordering::Less]))
+                per_value!(|value| self.cmp_is(value, *b, &[Ordering::Less], store))
             }
             Constraint::MaxInclusive(b) => {
-                per_value!(|value| self.cmp_is(value, *b, &[Ordering::Less, Ordering::Equal]))
+                per_value!(|value| self.cmp_is(value, *b, &[Ordering::Less, Ordering::Equal], store))
             }
 
             // --- string based
             Constraint::MinLength(n) => {
-                per_value!(|value| self.str_len(value).is_some_and(|l| l >= *n as usize))
+                per_value!(|value| self.str_len(value, store).is_some_and(|l| l >= *n as usize))
             }
             Constraint::MaxLength(n) => {
-                per_value!(|value| self.str_len(value).is_some_and(|l| l <= *n as usize))
+                per_value!(|value| self.str_len(value, store).is_some_and(|l| l <= *n as usize))
             }
             Constraint::Pattern { regex, source } => {
                 for row in sets.rows() {
                     for &value in row.values {
                         // Blank nodes have no lexical form to match against.
-                        let ok = self.store.kind(value) != TermKind::Blank
-                            && self
-                                .store
+                        let ok = store.kind(value) != TermKind::Blank
+                            && store
                                 .lexical_form(value)
                                 .is_some_and(|s| regex.is_match(s));
                         if !ok {
@@ -303,9 +322,9 @@ impl Engine<'_> {
                 }
             }
             Constraint::LanguageIn(ranges) => per_value!(|value| {
-                self.store.language(value).is_some_and(|tag| {
+                store.language(value).is_some_and(|tag| {
                     ranges.iter().any(|&r| {
-                        self.store
+                        store
                             .lexical_form(r)
                             .is_some_and(|range| datatypes::language_matches(tag, range))
                     })
@@ -320,13 +339,13 @@ impl Engine<'_> {
                     let mut seen: Vec<LangKey<'_>> = Vec::new();
                     let mut reported: Vec<LangKey<'_>> = Vec::new();
                     for &value in row.values {
-                        let Some(tag) = self.store.language(value) else {
+                        let Some(tag) = store.language(value) else {
                             continue;
                         };
                         if tag.is_empty() {
                             continue;
                         }
-                        let key = (tag, self.store.direction(value));
+                        let key = (tag, store.direction(value));
                         if seen.contains(&key) {
                             if !reported.contains(&key) {
                                 reported.push(key);
@@ -367,7 +386,7 @@ impl Engine<'_> {
                 }
             }
             Constraint::LessThan(p) => {
-                self.pair_order(shape, component, sets, p, &[Ordering::Less], out)
+                self.pair_order(shape, component, sets, p, &[Ordering::Less], out, store)
             }
             Constraint::LessThanOrEquals(p) => self.pair_order(
                 shape,
@@ -376,13 +395,14 @@ impl Engine<'_> {
                 p,
                 &[Ordering::Less, Ordering::Equal],
                 out,
+                store,
             ),
 
             // --- logical
             Constraint::Not(inner) => {
                 for row in sets.rows() {
                     for &value in row.values {
-                        if self.conforms(*inner, value, stack)? {
+                        if self.conforms(*inner, value, stack, store)? {
                             out.push(self.result(shape, component, row.focus).with_value(value));
                         }
                     }
@@ -393,7 +413,7 @@ impl Engine<'_> {
                     for &value in row.values {
                         let mut all = true;
                         for &m in members {
-                            if !self.conforms(m, value, stack)? {
+                            if !self.conforms(m, value, stack, store)? {
                                 all = false;
                                 break;
                             }
@@ -409,7 +429,7 @@ impl Engine<'_> {
                     for &value in row.values {
                         let mut any = false;
                         for &m in members {
-                            if self.conforms(m, value, stack)? {
+                            if self.conforms(m, value, stack, store)? {
                                 any = true;
                                 break;
                             }
@@ -425,7 +445,7 @@ impl Engine<'_> {
                     for &value in row.values {
                         let mut n = 0;
                         for &m in members {
-                            if self.conforms(m, value, stack)? {
+                            if self.conforms(m, value, stack, store)? {
                                 n += 1;
                             }
                         }
@@ -440,7 +460,7 @@ impl Engine<'_> {
             Constraint::Node(inner) => {
                 for row in sets.rows() {
                     for &value in row.values {
-                        if !self.conforms(*inner, value, stack)? {
+                        if !self.conforms(*inner, value, stack, store)? {
                             out.push(self.result(shape, component, row.focus).with_value(value));
                         }
                     }
@@ -454,7 +474,7 @@ impl Engine<'_> {
                 // nested shape is evaluated once per (focus node, value) pair,
                 // so a value reached from two focus nodes is validated twice and
                 // yields two results.
-                self.validate_shape(*inner, sets.all_values(), out, stack)?;
+                self.validate_shape(*inner, sets.all_values(), out, stack, store)?;
             }
             Constraint::QualifiedValueShape {
                 shape: qshape,
@@ -466,13 +486,13 @@ impl Engine<'_> {
                 for row in sets.rows() {
                     let mut n = 0u32;
                     for &value in row.values {
-                        if !self.conforms(*qshape, value, stack)? {
+                        if !self.conforms(*qshape, value, stack, store)? {
                             continue;
                         }
                         if *disjoint {
                             let mut clashes = false;
                             for &s in siblings {
-                                if self.conforms(s, value, stack)? {
+                                if self.conforms(s, value, stack, store)? {
                                     clashes = true;
                                     break;
                                 }
@@ -543,7 +563,7 @@ impl Engine<'_> {
                             continue;
                         };
                         let mut nested = Vec::new();
-                        self.validate_shape(*inner, &members, &mut nested, stack)?;
+                        self.validate_shape(*inner, &members, &mut nested, stack, store)?;
                         if !nested.is_empty() {
                             let mut r =
                                 self.result(shape, component, row.focus).with_value(value);
@@ -587,7 +607,7 @@ impl Engine<'_> {
                 }
             }
             Constraint::SingleLine => per_value!(|value| {
-                self.store
+                store
                     .lexical_form(value)
                     .is_some_and(|s| !s.contains(is_line_break))
             }),
@@ -609,7 +629,7 @@ impl Engine<'_> {
                 for row in sets.rows() {
                     let mut any = false;
                     for &value in row.values {
-                        if self.conforms(*inner, value, stack)? {
+                        if self.conforms(*inner, value, stack, store)? {
                             any = true;
                             break;
                         }
@@ -647,7 +667,44 @@ impl Engine<'_> {
                 }
             }
 
-            Constraint::Sparql(sc) => self.eval_sparql(shape, sc, sets, out)?,
+            Constraint::Expression(expr) => {
+                for row in sets.rows() {
+                    for &value in row.values {
+                        let got = self.eval_expr(*expr, value, store)?;
+                        let truthy = got
+                            .first()
+                            .is_some_and(|&t| store.lexical_form(t) == Some("true"));
+                        if !truthy {
+                            let mut r =
+                                self.result(shape, component, row.focus).with_value(value);
+                            // The expression itself is what was violated.
+                            r.source_constraint = Some(*expr);
+                            out.push(r);
+                        }
+                    }
+                }
+            }
+            Constraint::NodeByExpression(expr) => {
+                for row in sets.rows() {
+                    for &value in row.values {
+                        // The expression names the shapes to conform to.
+                        let shapes = self.eval_expr(*expr, value, store)?;
+                        for target in shapes {
+                            let ok = match self.shapes.id_of(target) {
+                                Some(id) => self.conforms(id, value, stack, store)?,
+                                None => true,
+                            };
+                            if !ok {
+                                out.push(
+                                    self.result(shape, component, row.focus).with_value(value),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            Constraint::Sparql(sc) => self.eval_sparql(shape, sc, sets, out, store)?,
 
             Constraint::Custom(cc) => {
                 // Unlike sh:sparql, a component's validator runs once per value
@@ -655,19 +712,19 @@ impl Engine<'_> {
                 for row in sets.rows() {
                     for &value in row.values {
                         let mut bindings = vec![
-                            ("this", crate::sparql::to_term(row.focus, self.store)),
-                            ("value", crate::sparql::to_term(value, self.store)),
+                            ("this", crate::sparql::to_term(row.focus, store)),
+                            ("value", crate::sparql::to_term(value, store)),
                         ];
                         for (name, term) in &cc.bindings {
                             bindings
-                                .push((name.as_str(), crate::sparql::to_term(*term, self.store)));
+                                .push((name.as_str(), crate::sparql::to_term(*term, store)));
                         }
 
                         let solutions = crate::sparql::run(
                             &cc.query.query,
                             &bindings,
                             self.data,
-                            self.store,
+                            store,
                         )?;
                         // An ASK validator passes when it answers true; a
                         // SELECT validator faults once per solution.
@@ -704,14 +761,15 @@ impl Engine<'_> {
         sc: &crate::sparql::SparqlConstraint,
         sets: &ValueSets,
         out: &mut Vec<ValidationResult>,
+        store: &mut TermStore,
     ) -> Result<()> {
         let v = self.vocab;
         let severity = sc.severity.unwrap_or(shape.severity);
 
         for row in sets.rows() {
-            let this = crate::sparql::to_term(row.focus, self.store);
+            let this = crate::sparql::to_term(row.focus, store);
             let solutions =
-                crate::sparql::run(&sc.query, &[("this", this)], self.data, self.store)?;
+                crate::sparql::run(&sc.query, &[("this", this)], self.data, store)?;
 
             // ASK inverts: answering true means the constraint is satisfied.
             let failures: Vec<_> = if sc.is_ask {
@@ -742,7 +800,7 @@ impl Engine<'_> {
                 // the query invented rather than read are not in the store and
                 // simply do not appear in the report.
                 if let Some(t) = solution.get("this") {
-                    if let Some(id) = crate::sparql::from_term(t.as_ref(), self.store) {
+                    if let Some(id) = crate::sparql::from_term(t.as_ref(), store) {
                         r.focus_node = id;
                     }
                 }
@@ -750,11 +808,11 @@ impl Engine<'_> {
                 // the focus node itself, which is what the suite's expected
                 // reports contain for queries projecting only `$this`.
                 r.value = match solution.get("value") {
-                    Some(t) => crate::sparql::from_term(t.as_ref(), self.store),
+                    Some(t) => crate::sparql::from_term(t.as_ref(), store),
                     None => Some(r.focus_node),
                 };
                 if let Some(t) = solution.get("path") {
-                    if let Some(id) = crate::sparql::from_term(t.as_ref(), self.store) {
+                    if let Some(id) = crate::sparql::from_term(t.as_ref(), store) {
                         r.path = Some(id);
                     }
                 }
@@ -764,19 +822,37 @@ impl Engine<'_> {
         Ok(())
     }
 
+    /// Evaluates a node expression written in the shapes graph.
+    fn eval_expr(
+        &self,
+        expr: TermId,
+        focus: TermId,
+        store: &mut TermStore,
+    ) -> Result<Vec<TermId>> {
+        let ctx = crate::nodeexpr::Ctx {
+            data: self.data,
+            exprs: self.shapes_graph,
+            vocab: self.vocab,
+            shnex: &self.shnex,
+            shapes: Some(self.shapes),
+            vars: &[],
+        };
+        crate::nodeexpr::eval(expr, Some(focus), &ctx, store)
+    }
+
     // ---------------------------------------------------------------- helpers
 
-    fn cmp_is(&self, a: TermId, b: TermId, wanted: &[Ordering]) -> bool {
-        datatypes::compare(a, b, self.store, self.vocab).is_some_and(|o| wanted.contains(&o))
+    fn cmp_is(&self, a: TermId, b: TermId, wanted: &[Ordering], store: &TermStore) -> bool {
+        datatypes::compare(a, b, store, self.vocab).is_some_and(|o| wanted.contains(&o))
     }
 
     /// Length in characters, or `None` for terms that have no lexical form to
     /// measure — blank nodes, which `sh:minLength`/`sh:maxLength` always fault.
-    fn str_len(&self, t: TermId) -> Option<usize> {
-        if self.store.kind(t) == TermKind::Blank {
+    fn str_len(&self, t: TermId, store: &TermStore) -> Option<usize> {
+        if store.kind(t) == TermKind::Blank {
             return None;
         }
-        self.store.lexical_form(t).map(|s| s.chars().count())
+        store.lexical_form(t).map(|s| s.chars().count())
     }
 
     /// The length of the RDF collection headed by `t`, or `None` if it is not a
@@ -798,6 +874,7 @@ impl Engine<'_> {
     /// One result per failing *pair*, not per failing value: a value node
     /// compared against two incomparable siblings yields two results, which is
     /// what the suite's expected reports contain.
+    #[allow(clippy::too_many_arguments)]
     fn pair_order(
         &self,
         shape: &Shape,
@@ -806,12 +883,13 @@ impl Engine<'_> {
         p: &Path,
         wanted: &[Ordering],
         out: &mut Vec<ValidationResult>,
+        store: &TermStore,
     ) {
         for row in sets.rows() {
             let other = self.path_values(row.focus, p);
             for &value in row.values {
                 for &o in &other {
-                    if !self.cmp_is(value, o, wanted) {
+                    if !self.cmp_is(value, o, wanted, store) {
                         out.push(self.result(shape, component, row.focus).with_value(value));
                     }
                 }

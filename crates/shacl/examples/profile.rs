@@ -143,7 +143,7 @@ fn main() {
 
     // --- phase 3: the whole thing
     let t = Instant::now();
-    let report = shacl::validate::validate_with(&data, &compiled, &store, &vocab).unwrap();
+    let report = shacl::validate::validate_with(&data, &compiled, &mut store, &vocab).unwrap();
     let full = t.elapsed();
     println!("validate     {:>9.4}s  ({} results)", full.as_secs_f64(), report.results.len());
 
