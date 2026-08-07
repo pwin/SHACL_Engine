@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/shacl", "crates/shacl-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pw/new-shacl-engine"
+
+[workspace.dependencies]
+oxrdf = { version = "0.3", features = ["oxsdatatypes", "rdfc-10"] }
+oxrdfio = { version = "0.2", features = ["rdf-12"] }
+oxsdatatypes = "0.2"
+# `sparql-12` must track oxrdf's `rdf-12`: enabling triple terms in the term
+# model without it leaves the SPARQL crates unable to match on `Term::Triple`.
+spargebra = { version = "0.4", features = ["sparql-12"] }
+spareval = { version = "0.2", features = ["sparql-12"] }
+rayon = "1.12"
+hashbrown = "0.16"
+regex = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+# Optimised profile for the benchmark / release binaries: SHACL validation is
+# dominated by index probing, so LTO + a single codegen unit pay off well.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# `bench` inherits from release but keeps unwinding so criterion can catch panics.
+[profile.bench]
+lto = "fat"
+codegen-units = 1

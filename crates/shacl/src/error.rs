@@ -1,0 +1,30 @@
+//! Engine-wide error type.
+
+use std::fmt;
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// A file could not be read or written.
+    Io(String),
+    /// An RDF document could not be parsed.
+    Parse(String),
+    /// The shapes graph is not well-formed, e.g. a malformed property path.
+    Shape(String),
+    /// A SPARQL query could not be parsed or evaluated.
+    Sparql(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(m) => write!(f, "I/O error: {m}"),
+            Self::Parse(m) => write!(f, "parse error: {m}"),
+            Self::Shape(m) => write!(f, "invalid shapes graph: {m}"),
+            Self::Sparql(m) => write!(f, "SPARQL error: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}

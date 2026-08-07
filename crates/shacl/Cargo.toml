@@ -1,0 +1,20 @@
+[package]
+name = "shacl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A high-performance SHACL validation engine"
+
+[dependencies]
+oxrdf.workspace = true
+oxrdfio.workspace = true
+oxsdatatypes.workspace = true
+spargebra.workspace = true
+spareval.workspace = true
+rayon.workspace = true
+hashbrown.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true

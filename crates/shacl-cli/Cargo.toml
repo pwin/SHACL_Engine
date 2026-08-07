@@ -1,0 +1,16 @@
+[package]
+name = "shacl-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Command line interface for the shacl validation engine"
+
+[[bin]]
+name = "shacl"
+path = "src/main.rs"
+
+[dependencies]
+shacl = { path = "../shacl" }
+clap.workspace = true
+anyhow.workspace = true

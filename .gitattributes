@@ -1,0 +1,4 @@
+# Normalise to LF in the repository. The vendored RDF fixtures come from
+# upstream with LF endings, and letting them churn to CRLF would make every
+# suite refresh look like a whole-file rewrite.
+* text=auto eol=lf
