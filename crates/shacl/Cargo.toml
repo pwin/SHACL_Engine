@@ -9,6 +9,7 @@ description = "A high-performance SHACL validation engine"
 [dependencies]
 oxrdf.workspace = true
 oxrdfio.workspace = true
+oxttl = { version = "0.2", features = ["rdf-12"] }
 oxsdatatypes.workspace = true
 spargebra.workspace = true
 spareval.workspace = true
@@ -16,5 +17,7 @@ rayon.workspace = true
 hashbrown.workspace = true
 regex.workspace = true
 
+
 [dev-dependencies]
+mimalloc = { version = "0.1", default-features = false }
 anyhow.workspace = true
