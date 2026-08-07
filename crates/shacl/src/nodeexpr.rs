@@ -172,22 +172,31 @@ fn eval_at(
     }
 
     if let Some(list) = g.object(node, s.concat) {
+        // Sequence concatenation, not string concatenation — that is
+        // `sparql:concat`, in the other namespace.
         let parts = g
             .list(list, ctx.vocab)
             .ok_or_else(|| Error::Shape("shnex:concat needs a list".into()))?;
-        let mut text = String::new();
+        let mut out = Vec::new();
         for part in parts {
-            for v in sub!(part, focus) {
-                text.push_str(store.lexical_form(v).unwrap_or_default());
-            }
+            out.extend(sub!(part, focus));
         }
-        return Ok(vec![store.literal(&text, &format!("{XSD}string"), None)]);
+        return Ok(out);
     }
 
     if let Some(inner) = g.object(node, s.sum) {
         let values = sub!(inner, focus);
+        // The result's datatype follows the inputs: summing decimals yields a
+        // decimal even when the total happens to be whole.
+        let all_integers = values
+            .iter()
+            .all(|&v| store.datatype(v) == Some(ctx.vocab.xsd_integer));
         let total: f64 = values.iter().filter_map(|&v| number(v, store)).sum();
-        return Ok(vec![number_literal(total, store)]);
+        return Ok(vec![if all_integers {
+            int_literal(total as i64, store)
+        } else {
+            decimal_literal(total, store)
+        }]);
     }
 
     for (op, want_min) in [(s.min, true), (s.max, false)] {
@@ -361,7 +370,7 @@ fn eval_at(
             // participates: SPARQL functions take terms, not sequences.
             values.push(sub!(arg, focus).into_iter().next());
         }
-        return eval_sparql_call(&func, &values, store);
+        return eval_sparql_call(&func, &values, store, ctx.vocab);
     }
 
     // A blank node heading an RDF list is a sequence of expressions, evaluated
@@ -429,6 +438,7 @@ fn eval_sparql_call(
     func: &str,
     args: &[Option<TermId>],
     store: &mut TermStore,
+    vocab: &Vocab,
 ) -> Result<Vec<TermId>> {
     // An argument that produced no value makes the whole call undefined.
     let mut rendered = Vec::with_capacity(args.len());
@@ -467,7 +477,8 @@ fn eval_sparql_call(
     let Some(term) = rows.first().and_then(|r| r.get("r")).cloned() else {
         return Ok(Vec::new());
     };
-    Ok(vec![store.intern_oxrdf(term.as_ref(), crate::model::scope::SPARQL)])
+    let interned = store.intern_oxrdf(term.as_ref(), crate::model::scope::SPARQL);
+    Ok(vec![canonicalise(interned, store, vocab)])
 }
 
 enum Operator {
@@ -499,11 +510,18 @@ fn sparql_operator(func: &str) -> Option<Operator> {
 }
 
 /// The SPARQL spelling of a function whose SHACL name differs.
+///
+/// The type-test predicates are the awkward ones: SPARQL capitalises their
+/// suffixes, so `isBlank` has to be emitted as `isBLANK`.
 fn sparql_function_name(func: &str) -> &str {
     match func {
         "encode" => "ENCODE_FOR_URI",
         "uri" => "IRI",
         "sameValue" => "sameTerm",
+        "isBlank" => "isBLANK",
+        "isLiteral" => "isLITERAL",
+        "isNumeric" => "isNUMERIC",
+        "isTriple" => "isTRIPLE",
         other => other,
     }
 }
@@ -543,12 +561,32 @@ fn bool_literal(b: bool, store: &mut TermStore) -> TermId {
     )
 }
 
-fn number_literal(n: f64, store: &mut TermStore) -> TermId {
-    if n.fract() == 0.0 && n.abs() < 9e15 {
-        int_literal(n as i64, store)
-    } else {
-        store.literal(&n.to_string(), &format!("{XSD}decimal"), None)
+/// An `xsd:decimal` in canonical form, which always carries a fraction digit:
+/// the canonical spelling of four is `4.0`, not `4`.
+fn decimal_literal(n: f64, store: &mut TermStore) -> TermId {
+    let mut lex = n.to_string();
+    if !lex.contains('.') {
+        lex.push_str(".0");
     }
+    store.literal(&lex, &format!("{XSD}decimal"), None)
+}
+
+/// Rewrites an `xsd:decimal` into canonical form.
+///
+/// SPARQL evaluation yields decimals spelled without a fraction digit, which
+/// are the same value but a different term.
+fn canonicalise(t: TermId, store: &mut TermStore, vocab: &Vocab) -> TermId {
+    if store.datatype(t) != Some(vocab.xsd_decimal) {
+        return t;
+    }
+    let Some(lex) = store.lexical_form(t) else {
+        return t;
+    };
+    if lex.contains('.') {
+        return t;
+    }
+    let lex = format!("{lex}.0");
+    store.literal(&lex, &format!("{XSD}decimal"), None)
 }
 
 #[cfg(test)]

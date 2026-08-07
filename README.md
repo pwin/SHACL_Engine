@@ -33,9 +33,11 @@ sequence. Expected and actual reports are compared through one in-memory
 representation rather than by diffing serialised RDF; `sh:resultMessage` is
 excluded, since the spec leaves message text to the implementation.
 
-**383 of 426** tests pass. The remainder are node expressions: the `shnex-sparql`
-group, which exposes the SPARQL function library as node expressions, is not
-implemented, and parts of the `shnex` algebra are still missing.
+**392 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
+SPARQL-based constraints with pre-binding, user-declared constraint components
+and the node expression algebra are all implemented. What remains is a tail of
+SHACL 1.2 features — `sh:closed sh:ByTypes`, `sh:reifierShape`,
+`sh:targetWhere`, RDF 1.2 annotation syntax — and scattered edge cases.
 
 ```sh
 cargo test -p shacl --test w3c -- --nocapture      # summary
