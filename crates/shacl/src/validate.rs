@@ -614,6 +614,47 @@ impl Engine<'_> {
             }
 
             Constraint::Sparql(sc) => self.eval_sparql(shape, sc, sets, out)?,
+
+            Constraint::Custom(cc) => {
+                // Unlike sh:sparql, a component's validator runs once per value
+                // node, with ?value pre-bound alongside the parameters.
+                for row in sets.rows() {
+                    for &value in row.values {
+                        let mut bindings = vec![
+                            ("this", crate::sparql::to_term(row.focus, self.store)),
+                            ("value", crate::sparql::to_term(value, self.store)),
+                        ];
+                        for (name, term) in &cc.bindings {
+                            bindings
+                                .push((name.as_str(), crate::sparql::to_term(*term, self.store)));
+                        }
+
+                        let solutions = crate::sparql::run(
+                            &cc.query.query,
+                            &bindings,
+                            self.data,
+                            self.store,
+                        )?;
+                        // An ASK validator passes when it answers true; a
+                        // SELECT validator faults once per solution.
+                        let failed = if cc.query.is_ask {
+                            solutions.is_empty()
+                        } else {
+                            !solutions.is_empty()
+                        };
+                        if failed {
+                            let mut r = self
+                                .result(shape, cc.component, row.focus)
+                                .with_value(value);
+                            r.source_constraint = Some(cc.query.source);
+                            if !cc.query.message.is_empty() {
+                                r.messages.clone_from(&cc.query.message);
+                            }
+                            out.push(r);
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }

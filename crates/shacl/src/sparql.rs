@@ -180,14 +180,27 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
     header
 }
 
-/// Rewrites `BOUND(?v)` to `true` for every pre-bound variable `v`.
+/// Substitutes pre-bound variables into the query algebra.
 ///
-/// SHACL pre-binding means the variable *is* bound, so `FILTER(bound($this))`
-/// must pass. The evaluator substitutes the variable with its term before
-/// evaluating, at which point `BOUND` is applied to a constant and no longer
-/// answers true. Folding those calls away first restores the intended meaning.
-fn fold_bound(query: &Query, prebound: &[&str]) -> Query {
-    let is_prebound = |v: &Variable| prebound.contains(&v.as_str());
+/// Doing this here rather than handing the bindings to the evaluator matters
+/// for two reasons. The evaluator only substitutes variables that appear in the
+/// `SELECT` projection, which rules out `ASK` validators and component
+/// parameters entirely. And SHACL's pre-binding means the variable *is* bound,
+/// so `FILTER(bound($this))` must pass — whereas any substitution leaves `BOUND`
+/// applied to a constant, which answers false. Those calls are folded to `true`
+/// in the same pass.
+///
+/// Replacing the variable throughout the algebra also gives the union
+/// behaviour SHACL requires for free: a body of
+/// `{ FILTER(false) } UNION { FILTER($this = ex:X) }` has the constant in both
+/// branches, where a `VALUES` clause joined outside would reach neither.
+fn substitute(query: &Query, bindings: &[(&str, Term)]) -> Query {
+    let lookup = |v: &Variable| -> Option<Term> {
+        bindings
+            .iter()
+            .find(|(n, _)| *n == v.as_str())
+            .map(|(_, t)| t.clone())
+    };
     match query {
         Query::Select {
             dataset,
@@ -195,7 +208,7 @@ fn fold_bound(query: &Query, prebound: &[&str]) -> Query {
             base_iri,
         } => Query::Select {
             dataset: dataset.clone(),
-            pattern: fold_pattern(pattern, &is_prebound),
+            pattern: fold_pattern(pattern, &lookup),
             base_iri: base_iri.clone(),
         },
         Query::Ask {
@@ -204,8 +217,40 @@ fn fold_bound(query: &Query, prebound: &[&str]) -> Query {
             base_iri,
         } => Query::Ask {
             dataset: dataset.clone(),
-            pattern: fold_pattern(pattern, &is_prebound),
+            pattern: fold_pattern(pattern, &lookup),
             base_iri: base_iri.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Substitutes a term into a triple-pattern position.
+fn fold_term_pattern(
+    t: &spargebra::term::TermPattern,
+    pre: &dyn Fn(&Variable) -> Option<Term>,
+) -> spargebra::term::TermPattern {
+    use spargebra::term::TermPattern as T;
+    match t {
+        T::Variable(v) => match pre(v) {
+            Some(Term::NamedNode(n)) => T::NamedNode(n),
+            Some(Term::BlankNode(b)) => T::BlankNode(b),
+            Some(Term::Literal(l)) => T::Literal(l),
+            _ => t.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Substitutes into a predicate position, which only accepts IRIs.
+fn fold_named_node_pattern(
+    n: &spargebra::term::NamedNodePattern,
+    pre: &dyn Fn(&Variable) -> Option<Term>,
+) -> spargebra::term::NamedNodePattern {
+    use spargebra::term::NamedNodePattern as N;
+    match n {
+        N::Variable(v) => match pre(v) {
+            Some(Term::NamedNode(node)) => N::NamedNode(node),
+            _ => n.clone(),
         },
         other => other.clone(),
     }
@@ -213,11 +258,40 @@ fn fold_bound(query: &Query, prebound: &[&str]) -> Query {
 
 fn fold_pattern(
     p: &spargebra::algebra::GraphPattern,
-    pre: &dyn Fn(&Variable) -> bool,
+    pre: &dyn Fn(&Variable) -> Option<Term>,
 ) -> spargebra::algebra::GraphPattern {
     use spargebra::algebra::GraphPattern as G;
     let sub = |x: &G| Box::new(fold_pattern(x, pre));
     match p {
+        G::Bgp { patterns } => G::Bgp {
+            patterns: patterns
+                .iter()
+                .map(|t| spargebra::term::TriplePattern {
+                    subject: fold_term_pattern(&t.subject, pre),
+                    predicate: fold_named_node_pattern(&t.predicate, pre),
+                    object: fold_term_pattern(&t.object, pre),
+                })
+                .collect(),
+        },
+        G::Path {
+            subject,
+            path,
+            object,
+        } => G::Path {
+            subject: fold_term_pattern(subject, pre),
+            path: path.clone(),
+            object: fold_term_pattern(object, pre),
+        },
+        // A substituted variable is no longer produced by the pattern, so it
+        // must leave the projection too or the evaluator will reject it.
+        G::Project { inner, variables } => G::Project {
+            inner: sub(inner),
+            variables: variables
+                .iter()
+                .filter(|v| pre(v).is_none())
+                .cloned()
+                .collect(),
+        },
         G::Join { left, right } => G::Join {
             left: sub(left),
             right: sub(right),
@@ -260,10 +334,6 @@ fn fold_pattern(
             inner: sub(inner),
             expression: expression.clone(),
         },
-        G::Project { inner, variables } => G::Project {
-            inner: sub(inner),
-            variables: variables.clone(),
-        },
         G::Distinct { inner } => G::Distinct { inner: sub(inner) },
         G::Reduced { inner } => G::Reduced { inner: sub(inner) },
         G::Slice {
@@ -301,12 +371,20 @@ fn fold_pattern(
 
 fn fold_expr(
     e: &spargebra::algebra::Expression,
-    pre: &dyn Fn(&Variable) -> bool,
+    pre: &dyn Fn(&Variable) -> Option<Term>,
 ) -> spargebra::algebra::Expression {
     use spargebra::algebra::Expression as E;
     let sub = |x: &E| Box::new(fold_expr(x, pre));
     match e {
-        E::Bound(v) if pre(v) => E::Literal(oxrdf::Literal::from(true)),
+        // A pre-bound variable is bound by definition.
+        E::Bound(v) if pre(v).is_some() => E::Literal(oxrdf::Literal::from(true)),
+        E::Variable(v) => match pre(v) {
+            Some(Term::NamedNode(n)) => E::NamedNode(n),
+            Some(Term::Literal(l)) => E::Literal(l),
+            // A blank node has no expression form; leave it to evaluate as
+            // unbound rather than silently changing its meaning.
+            _ => e.clone(),
+        },
         E::Or(a, b) => E::Or(sub(a), sub(b)),
         E::And(a, b) => E::And(sub(a), sub(b)),
         E::Equal(a, b) => E::Equal(sub(a), sub(b)),
@@ -354,14 +432,8 @@ pub fn run(
 ) -> Result<Vec<HashMap<String, Term>>> {
     let adapter = DataAdapter::new(graph, store);
     let evaluator = QueryEvaluator::new();
-    let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
-    let folded = fold_bound(query, &names);
-    let mut prepared = evaluator.prepare(&folded);
-    for (name, term) in bindings {
-        let var = Variable::new(*name)
-            .map_err(|e| Error::Sparql(format!("bad pre-bound variable {name}: {e}")))?;
-        prepared = prepared.substitute_variable(var, term.clone());
-    }
+    let substituted = substitute(query, bindings);
+    let prepared = evaluator.prepare(&substituted);
 
     match prepared
         .execute(&adapter)

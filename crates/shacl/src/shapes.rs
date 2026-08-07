@@ -139,6 +139,20 @@ pub enum Constraint {
     /// A `sh:sparql` constraint. Boxed because the parsed query dwarfs every
     /// other variant, and would otherwise set the size of all of them.
     Sparql(Box<crate::sparql::SparqlConstraint>),
+
+    /// An instance of a user-declared constraint component.
+    Custom(Box<CustomConstraint>),
+}
+
+/// One shape's use of a user-declared constraint component.
+#[derive(Debug, Clone)]
+pub struct CustomConstraint {
+    /// The component IRI, reported as `sh:sourceConstraintComponent`.
+    pub component: TermId,
+    pub query: crate::sparql::SparqlConstraint,
+    /// Parameter values from the shape, pre-bound by the local name of each
+    /// parameter's `sh:path` — `ex:test1` binds `$test1`.
+    pub bindings: Vec<(String, TermId)>,
 }
 
 impl Constraint {
@@ -187,6 +201,7 @@ impl Constraint {
             Self::SomeValue(_) => v.sh_SomeValueConstraintComponent,
             Self::UniqueValuesFor(_) => v.sh_UniqueValuesForConstraintComponent,
             Self::Sparql(_) => v.sh_SPARQLConstraintComponent,
+            Self::Custom(c) => c.component,
         }
     }
 
@@ -676,7 +691,81 @@ impl<'a> Compiler<'a> {
             )));
         }
 
+        // --- user-declared constraint components
+        self.compile_custom(node, path, &mut out)?;
+
         Ok(out)
+    }
+
+    /// Instantiates every declared constraint component whose parameters this
+    /// shape supplies.
+    ///
+    /// A component applies only when the shape carries a value for each of its
+    /// non-optional parameters; a shape mentioning just some of them does not
+    /// trigger it.
+    fn compile_custom(
+        &mut self,
+        node: TermId,
+        path: Option<&Path>,
+        out: &mut Vec<Constraint>,
+    ) -> Result<()> {
+        let v = self.vocab;
+        let g = self.graph;
+
+        // A constraint component is exactly a node declaring parameters.
+        let components: Vec<TermId> = {
+            let mut c: Vec<TermId> = g.subjects_of(v.sh_parameter).collect();
+            c.sort_unstable();
+            c.dedup();
+            c
+        };
+
+        for component in components {
+            let mut bindings = Vec::new();
+            let mut applies = true;
+            for param in g.objects(component, v.sh_parameter) {
+                let Some(param_path) = g.object(param, v.sh_path) else {
+                    continue;
+                };
+                let optional = self.flag(param, v.sh_optional);
+                match g.object(node, param_path) {
+                    Some(value) => {
+                        if let Some(name) = self.store.iri(param_path).map(local_name) {
+                            bindings.push((name, value));
+                        }
+                    }
+                    None if optional => {}
+                    None => {
+                        applies = false;
+                        break;
+                    }
+                }
+            }
+            if !applies || bindings.is_empty() {
+                continue;
+            }
+
+            // A component may offer separate validators per shape kind; the
+            // generic `sh:validator` is the fallback.
+            let specific = if path.is_some() {
+                v.sh_propertyValidator
+            } else {
+                v.sh_nodeValidator
+            };
+            let Some(validator) = g
+                .object(component, specific)
+                .or_else(|| g.object(component, v.sh_validator))
+            else {
+                continue;
+            };
+
+            out.push(Constraint::Custom(Box::new(CustomConstraint {
+                component,
+                query: self.compile_sparql(validator, path)?,
+                bindings,
+            })));
+        }
+        Ok(())
     }
 
     /// Compiles a `sh:SPARQLConstraint`, parsing its query once so validation
@@ -784,6 +873,16 @@ impl<'a> Compiler<'a> {
             .and_then(|s| s.trim().parse::<u32>().ok())
             .ok_or_else(|| Error::Shape(format!("{what} is not a non-negative integer")))
     }
+}
+
+/// The local name of an IRI: whatever follows the last `#` or `/`.
+///
+/// Constraint component parameters bind by local name, so `ex:test1` supplies
+/// the SPARQL variable `$test1`.
+fn local_name(iri: &str) -> String {
+    iri.rsplit_once(['#', '/'])
+        .map(|(_, local)| local.to_string())
+        .unwrap_or_else(|| iri.to_string())
 }
 
 /// Translates an XPath regex and `sh:flags` into a Rust regex.
