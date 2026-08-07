@@ -229,10 +229,21 @@ fn eval_at(
         return Ok(values.into_iter().skip(k).collect());
     }
 
-    if let Some(other) = g.object(node, s.intersection) {
-        let a = operand!();
-        let b = sub!(other, focus);
-        return Ok(a.into_iter().filter(|x| b.contains(x)).collect());
+    if let Some(list) = g.object(node, s.intersection) {
+        // A list of sequences, all intersected — not one sequence intersected
+        // with `shnex:nodes`.
+        let members = g
+            .list(list, ctx.vocab)
+            .ok_or_else(|| Error::Shape("shnex:intersection needs a list".into()))?;
+        let mut acc: Option<Vec<TermId>> = None;
+        for m in members {
+            let vs = sub!(m, focus);
+            acc = Some(match acc {
+                None => vs,
+                Some(prev) => prev.into_iter().filter(|x| vs.contains(x)).collect(),
+            });
+        }
+        return Ok(acc.unwrap_or_default());
     }
     if let Some(other) = g.object(node, s.remove) {
         let a = operand!();
@@ -253,18 +264,30 @@ fn eval_at(
         return Ok(out);
     }
 
-    if g.object(node, s.order_by).is_some() {
+    if let Some(key_expr) = g.object(node, s.order_by) {
+        // `shnex:orderBy` names a *key* expression evaluated per node, not the
+        // nodes themselves. A node with no key sorts first.
         let descending = g
             .object(node, s.desc)
             .and_then(|d| store.lexical_form(d))
             .is_some_and(|t| t == "true");
-        let mut values = operand!();
-        values.sort_by(|&a, &b| {
-            let o = crate::datatypes::compare(a, b, store, ctx.vocab)
-                .unwrap_or(std::cmp::Ordering::Equal);
+        let values = operand!();
+        let mut keyed = Vec::with_capacity(values.len());
+        for v in values {
+            let key = sub!(key_expr, Some(v)).into_iter().next();
+            keyed.push((key, v));
+        }
+        keyed.sort_by(|(a, _), (b, _)| {
+            let o = match (a, b) {
+                (Some(x), Some(y)) => crate::datatypes::compare(*x, *y, store, ctx.vocab)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            };
             if descending { o.reverse() } else { o }
         });
-        return Ok(values);
+        return Ok(keyed.into_iter().map(|(_, v)| v).collect());
     }
 
     if let Some(name) = g.object(node, s.var) {
@@ -370,6 +393,46 @@ fn eval_at(
             // participates: SPARQL functions take terms, not sequences.
             values.push(sub!(arg, focus).into_iter().next());
         }
+
+        // Two functions exist precisely to inspect absence, so they cannot go
+        // through the generic path, which treats a missing argument as making
+        // the whole call undefined.
+        match func.as_str() {
+            "bound" => {
+                let bound = values.first().is_some_and(Option::is_some);
+                return Ok(vec![bool_literal(bound, store)]);
+            }
+            "coalesce" => {
+                return Ok(values.into_iter().flatten().take(1).collect());
+            }
+            // The term tests are answered from the store rather than by SPARQL.
+            // They are trivial, and one of their arguments may be a blank node,
+            // which has no expression form: `isBLANK(_:b0)` does not parse.
+            "isBlank" | "isIRI" | "isURI" | "isLiteral" => {
+                let Some(Some(v)) = values.first() else {
+                    return Ok(Vec::new());
+                };
+                let kind = store.kind(*v);
+                let yes = match func.as_str() {
+                    "isBlank" => kind == crate::model::TermKind::Blank,
+                    "isLiteral" => kind == crate::model::TermKind::Literal,
+                    _ => kind == crate::model::TermKind::Iri,
+                };
+                return Ok(vec![bool_literal(yes, store)]);
+            }
+            // SHACL names these but SPARQL has no such functions; they reduce
+            // to a language-range match over the tag.
+            "hasLang" | "hasLangdir" => {
+                let (Some(Some(v)), Some(Some(want))) = (values.first(), values.get(1)) else {
+                    return Ok(Vec::new());
+                };
+                let tag = store.language(*v).unwrap_or_default().to_string();
+                let want = store.lexical_form(*want).unwrap_or_default().to_string();
+                let yes = crate::datatypes::language_matches(&tag, &want);
+                return Ok(vec![bool_literal(yes, store)]);
+            }
+            _ => {}
+        }
         return eval_sparql_call(&func, &values, store, ctx.vocab);
     }
 
@@ -468,7 +531,9 @@ fn eval_sparql_call(
 
     // An empty WHERE yields exactly one solution, so the expression is
     // evaluated once with nothing bound.
-    let query = crate::sparql::parse_query("", &format!("SELECT ({expr} AS ?r) WHERE {{}}"))?;
+    let text = format!("SELECT ({expr} AS ?r) WHERE {{}}");
+    let query = crate::sparql::parse_query("", &text)
+        .map_err(|e| Error::Sparql(format!("{e} in generated query: {text}")))?;
     let empty = crate::model::GraphBuilder::new().build();
     let rows = crate::sparql::run(&query, &[], &empty, store)?;
 
@@ -478,7 +543,11 @@ fn eval_sparql_call(
         return Ok(Vec::new());
     };
     let interned = store.intern_oxrdf(term.as_ref(), crate::model::scope::SPARQL);
-    Ok(vec![canonicalise(interned, store, vocab)])
+    Ok(vec![if canonicalises_decimals(func) {
+        canonicalise(interned, store, vocab)
+    } else {
+        interned
+    }])
 }
 
 enum Operator {
@@ -571,9 +640,30 @@ fn decimal_literal(n: f64, store: &mut TermStore) -> TermId {
     store.literal(&lex, &format!("{XSD}decimal"), None)
 }
 
+/// Whether a function's result should be rewritten into canonical decimal form.
+///
+/// Only arithmetic. The date and time accessors return a component of their
+/// input and keep its lexical form — `SECONDS` of `…T00:00:00` is `"00"`, and
+/// respelling that as `"0.0"` would be wrong even though the value is equal.
+fn canonicalises_decimals(func: &str) -> bool {
+    matches!(
+        func,
+        "abs"
+            | "ceil"
+            | "floor"
+            | "round"
+            | "divide"
+            | "multiply"
+            | "plus"
+            | "subtract"
+            | "unary-minus"
+            | "unary-plus"
+    )
+}
+
 /// Rewrites an `xsd:decimal` into canonical form.
 ///
-/// SPARQL evaluation yields decimals spelled without a fraction digit, which
+/// SPARQL arithmetic yields decimals spelled without a fraction digit, which
 /// are the same value but a different term.
 fn canonicalise(t: TermId, store: &mut TermStore, vocab: &Vocab) -> TermId {
     if store.datatype(t) != Some(vocab.xsd_decimal) {
@@ -782,3 +872,4 @@ mod tests {
         assert!(matches!(f.eval(None), Err(Error::Shape(_))));
     }
 }
+
