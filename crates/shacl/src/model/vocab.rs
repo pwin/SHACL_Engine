@@ -123,6 +123,7 @@ vocab! {
 
         // Other
         sh_closed = "closed",
+        sh_ByTypes = "ByTypes",
         sh_ignoredProperties = "ignoredProperties",
         sh_hasValue = "hasValue",
         sh_in = "in",

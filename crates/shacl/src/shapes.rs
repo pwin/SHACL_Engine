@@ -57,6 +57,9 @@ pub enum Target {
     ObjectsOf(TermId),
     /// A shape that is itself an `rdfs:Class` implicitly targets its instances.
     ImplicitClass(TermId),
+    /// `sh:targetWhere`: every node in the data graph conforming to the shape
+    /// declared at this node.
+    Where(TermId),
 }
 
 /// A compiled constraint, with every operand already resolved.
@@ -117,7 +120,14 @@ pub enum Constraint {
     // Other
     Closed {
         ignored: Vec<TermId>,
+        /// `sh:closed sh:ByTypes`: the permitted properties come from the
+        /// shapes attached to the focus node's own types rather than from this
+        /// shape alone.
+        by_types: bool,
     },
+    /// `sh:reifierShape`: the reifiers of each `(focus, path, value)` triple
+    /// must conform to the given shape.
+    ReifierShape(ShapeId),
     HasValue(TermId),
     In(Vec<TermId>),
 
@@ -196,6 +206,7 @@ impl Constraint {
             // evaluator overrides this.
             Self::QualifiedValueShape { .. } => v.sh_QualifiedMinCountConstraintComponent,
             Self::Closed { .. } => v.sh_ClosedConstraintComponent,
+            Self::ReifierShape(_) => v.sh_ReifierShapeConstraintComponent,
             Self::HasValue(_) => v.sh_HasValueConstraintComponent,
             Self::In(_) => v.sh_InConstraintComponent,
             Self::MinListLength(_) => v.sh_MinListLengthConstraintComponent,
@@ -462,6 +473,7 @@ impl<'a> Compiler<'a> {
         targets.extend(g.objects(node, v.sh_targetClass).map(Target::Class));
         targets.extend(g.objects(node, v.sh_targetSubjectsOf).map(Target::SubjectsOf));
         targets.extend(g.objects(node, v.sh_targetObjectsOf).map(Target::ObjectsOf));
+        targets.extend(g.objects(node, v.sh_targetWhere).map(Target::Where));
 
         // An IRI shape that is also a class targets its own instances.
         if self.store.is_iri(node)
@@ -633,17 +645,19 @@ impl<'a> Compiler<'a> {
         }
 
         // --- other
-        if g
-            .object(node, v.sh_closed)
-            .and_then(|t| self.store.lexical_form(t))
-            .map(|s| s == "true")
-            .unwrap_or(false)
-        {
-            let ignored = g
-                .object(node, v.sh_ignoredProperties)
-                .and_then(|l| g.list(l, v))
-                .unwrap_or_default();
-            out.push(Constraint::Closed { ignored });
+        // `sh:closed` is a boolean in SHACL 1.0 and may also be
+        // `sh:ByTypes` in 1.2, which widens the permitted set to whatever the
+        // focus node's own types declare.
+        if let Some(mode) = g.object(node, v.sh_closed) {
+            let lex = self.store.lexical_form(mode).unwrap_or_default();
+            let by_types = mode == v.sh_ByTypes;
+            if by_types || lex == "true" {
+                let ignored = g
+                    .object(node, v.sh_ignoredProperties)
+                    .and_then(|l| g.list(l, v))
+                    .unwrap_or_default();
+                out.push(Constraint::Closed { ignored, by_types });
+            }
         }
         for t in g.objects(node, v.sh_hasValue) {
             out.push(Constraint::HasValue(t));
@@ -661,6 +675,10 @@ impl<'a> Compiler<'a> {
         }
         for t in g.objects(node, v.sh_maxListLength) {
             out.push(Constraint::MaxListLength(self.uint(t, "sh:maxListLength")?));
+        }
+        for t in g.objects(node, v.sh_reifierShape) {
+            let id = self.shape_id(t)?;
+            out.push(Constraint::ReifierShape(id));
         }
         for t in g.objects(node, v.sh_memberShape) {
             let id = self.shape_id(t)?;
@@ -1080,7 +1098,7 @@ mod tests {
         let has = |f: fn(&Constraint) -> bool| shape.constraints.iter().any(f);
         assert!(has(|c| matches!(c, Constraint::In(v) if v.len() == 2)));
         assert!(has(|c| matches!(c, Constraint::LanguageIn(v) if v.len() == 2)));
-        assert!(has(|c| matches!(c, Constraint::Closed { ignored } if ignored.len() == 1)));
+        assert!(has(|c| matches!(c, Constraint::Closed { ignored, .. } if ignored.len() == 1)));
     }
 
     #[test]

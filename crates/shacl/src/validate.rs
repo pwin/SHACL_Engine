@@ -62,8 +62,22 @@ pub fn validate_in(
     let mut results = Vec::new();
     let mut stack = Vec::new();
     for &root in shapes.roots() {
-        let focus = engine.focus_nodes(shapes.get(root), store);
+        let focus = engine.focus_nodes(shapes.get(root), &mut stack, store)?;
         engine.validate_shape(root, &focus, &mut results, &mut stack, store)?;
+    }
+
+    // A data node may nominate its own shape with `sh:shape`. This is a target
+    // declared from the data side rather than by the shape, so it cannot make
+    // a shape a root — a nested property shape must not start validating on
+    // its own account just because the vocabulary exists.
+    let by_node: Vec<(TermId, TermId)> = data
+        .subjects_of(vocab.sh_shape)
+        .zip(data.objects_of(vocab.sh_shape))
+        .collect();
+    for (node, shape_node) in by_node {
+        if let Some(id) = shapes.id_of(shape_node) {
+            engine.validate_shape(id, &[node], &mut results, &mut stack, store)?;
+        }
     }
     Ok(ValidationReport { results })
 }
@@ -110,7 +124,12 @@ type Stack = Vec<(ShapeId, TermId)>;
 impl Engine<'_> {
     // ------------------------------------------------------------- targeting
 
-    fn focus_nodes(&self, shape: &Shape, _store: &TermStore) -> Vec<TermId> {
+    fn focus_nodes(
+        &self,
+        shape: &Shape,
+        stack: &mut Stack,
+        store: &mut TermStore,
+    ) -> Result<Vec<TermId>> {
         let mut out = Vec::new();
         for target in &shape.targets {
             match target {
@@ -118,10 +137,21 @@ impl Engine<'_> {
                 Target::Class(c) | Target::ImplicitClass(c) => self.instances_of(*c, &mut out),
                 Target::SubjectsOf(p) => out.extend(self.data.subjects_of(*p)),
                 Target::ObjectsOf(p) => out.extend(self.data.objects_of(*p)),
+                Target::Where(shape_node) => {
+                    // Every node in the data that conforms to the given shape.
+                    let Some(id) = self.shapes.id_of(*shape_node) else {
+                        continue;
+                    };
+                    for candidate in all_nodes(self.data) {
+                        if self.conforms(id, candidate, stack, store)? {
+                            out.push(candidate);
+                        }
+                    }
+                }
             }
         }
         sort_dedup(&mut out);
-        out
+        Ok(out)
     }
 
     /// Every node that is a SHACL instance of `class`, i.e. typed with `class`
@@ -521,9 +551,38 @@ impl Engine<'_> {
             }
 
             // --- other
-            Constraint::Closed { ignored } => {
-                let allowed = self.closed_allowed(shape, ignored);
+            Constraint::ReifierShape(inner) => {
+                // The annotation syntax `{| ... |}` produces a node that
+                // `rdf:reifies` the triple term, so the reifiers of a statement
+                // are found by looking that term up.
+                let Some(p) = shape.path.as_ref().and_then(|p| p.as_predicate()) else {
+                    return Ok(());
+                };
                 for row in sets.rows() {
+                    for &value in row.values {
+                        let Some(tt) = store.get_triple_term(row.focus, p, value) else {
+                            continue;
+                        };
+                        let reifiers: Vec<TermId> =
+                            self.data.subjects(v.rdf_reifies, tt).collect();
+                        self.validate_shape(*inner, &reifiers, out, stack, store)?;
+                    }
+                }
+            }
+            Constraint::Closed { ignored, by_types } => {
+                let allowed = if *by_types {
+                    Vec::new()
+                } else {
+                    self.closed_allowed(shape, ignored)
+                };
+                for row in sets.rows() {
+                    // Under `sh:ByTypes` the permitted set depends on the
+                    // focus node, so it is recomputed per row.
+                    let allowed = if *by_types {
+                        self.closed_by_types(row.focus, ignored)
+                    } else {
+                        allowed.clone()
+                    };
                     for (p, o) in self.data.predicate_objects(row.focus) {
                         if !allowed.contains(&p) {
                             // The offending predicate is the path here, not the
@@ -897,6 +956,45 @@ impl Engine<'_> {
         }
     }
 
+    /// Predicates permitted under `sh:closed sh:ByTypes`.
+    ///
+    /// The focus node's own types decide: each type that is itself a shape
+    /// contributes its property paths, and so does every superclass, so an
+    /// instance of a subclass may still use what its parent declares — but an
+    /// instance of the parent may not use what only the subclass declares.
+    fn closed_by_types(&self, focus: TermId, ignored: &[TermId]) -> Vec<TermId> {
+        let mut allowed = ignored.to_vec();
+        let mut queue: Vec<TermId> = self.data.objects(focus, self.vocab.rdf_type).collect();
+        let mut seen = queue.clone();
+        while let Some(class) = queue.pop() {
+            if let Some(id) = self.shapes.id_of(class) {
+                allowed.extend(self.property_paths(self.shapes.get(id)));
+            }
+            for up in self.data.objects(class, self.vocab.rdfs_subClassOf) {
+                if !seen.contains(&up) {
+                    seen.push(up);
+                    queue.push(up);
+                }
+            }
+        }
+        sort_dedup(&mut allowed);
+        allowed
+    }
+
+    /// The predicate paths a shape declares through `sh:property`.
+    fn property_paths(&self, shape: &Shape) -> Vec<TermId> {
+        shape
+            .constraints
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::Property(id) => {
+                    self.shapes.get(*id).path.as_ref().and_then(|p| p.as_predicate())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Predicates a closed shape permits: those declared by its own property
     /// shapes, plus `sh:ignoredProperties`.
     fn closed_allowed(&self, shape: &Shape, ignored: &[TermId]) -> Vec<TermId> {
@@ -934,4 +1032,15 @@ fn is_line_break(c: char) -> bool {
 fn sort_dedup(v: &mut Vec<TermId>) {
     v.sort_unstable();
     v.dedup();
+}
+
+/// Every distinct term appearing anywhere in `g`.
+fn all_nodes(g: &Graph) -> Vec<TermId> {
+    let mut out = Vec::with_capacity(g.len() * 2);
+    for [s, _, o] in g.iter() {
+        out.push(s);
+        out.push(o);
+    }
+    sort_dedup(&mut out);
+    out
 }

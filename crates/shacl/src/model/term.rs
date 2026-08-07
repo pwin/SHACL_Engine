@@ -206,9 +206,21 @@ impl TermStore {
     }
 
     pub fn triple_term(&mut self, s: TermId, p: TermId, o: TermId) -> TermId {
+        // Identity is the triple, not the slot it lands in. Allocating a fresh
+        // index every time would make two spellings of the same triple term
+        // distinct, and `sh:reifierShape` looks its subject up by equality.
+        if let Some(i) = self.triple_terms.iter().position(|t| *t == [s, p, o]) {
+            return self.push(TermData::Triple(i as u32));
+        }
         let idx = self.triple_terms.len() as u32;
         self.triple_terms.push([s, p, o]);
         self.push(TermData::Triple(idx))
+    }
+
+    /// Looks up an existing triple term without creating one.
+    pub fn get_triple_term(&self, s: TermId, p: TermId, o: TermId) -> Option<TermId> {
+        let i = self.triple_terms.iter().position(|t| *t == [s, p, o])?;
+        self.lookup.get(&TermData::Triple(i as u32)).copied()
     }
 
     /// Interns an `oxrdf` term parsed from the document identified by `scope`.
