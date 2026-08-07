@@ -47,14 +47,18 @@ Ryzen/Windows 11, release build (`lto = "fat"`, `codegen-units = 1`), best of 3.
 
 | instances | triples | results | ours | pySHACL | speedup | ours: validate only |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 6,914 | 88 | 0.021s | 1.369s | **64×** | 0.0010s |
-| 10,000 | 69,027 | 997 | 0.146s | 8.412s | **58×** | 0.0120s |
-| 100,000 | 689,861 | 10,179 | 1.422s | 81.654s | **57×** | 0.1520s |
+| 1,000 | 6,914 | 88 | 0.022s | 1.126s | **52×** | 0.0010s |
+| 10,000 | 69,027 | 997 | 0.069s | 7.036s | **102×** | 0.0080s |
+| 100,000 | 689,861 | 10,179 | 0.890s | 80.064s | **90×** | 0.1530s |
 
 Both engines report identical result counts at every size.
 
-At the largest size that is ~485k triples/second end to end, or ~4.5M
-triples/second through the validator alone, against ~8.4k/second for pySHACL.
+At the largest size that is ~775k triples/second end to end, or ~4.5M
+triples/second through the validator alone, against ~8.6k/second for pySHACL.
+
+The 1,000-instance row is the odd one out because the file is too small to
+chunk and process startup is a visible share of 22ms. The gap widens with size
+until parsing dominates, then settles.
 
 Run the benchmark with nothing else on the machine. An earlier run taken while
 a compile was in progress inflated the 100k end-to-end figure by 70% while
@@ -118,16 +122,30 @@ Pooling the working buffers that compound paths allocated per focus node was
 also done, and was worth about 10% — allocation was real but minor beside
 locality.
 
+### Then the parser, which had become 89% of the run
+
+Two changes took load at 100k from 1.27s to 0.72s.
+
+**Turtle parses across threads.** The document is split at statement
+boundaries and each chunk parsed with the prologue prepended. Chunking is
+refused unless provably safe — see `turtle_chunks` for the two conditions and
+why anonymous blank nodes still needed their own scope per chunk despite being
+statement-local.
+
+**mimalloc replaces the system allocator**, worth about 25%. Parsing allocates
+a string per term, millions of them on a large graph, and the system allocator
+becomes the contention point once that runs across threads. It helps the
+sequential path too.
+
 ### Where the time goes now
 
-Parsing, overwhelmingly: 1.27s of the 1.42s at 100k, or 89%. Validation is
-0.152s of it, and roughly 60% of *that* is still path evaluation.
+Load is 0.72s of the 0.89s at 100k. Within load, the parse is now roughly half
+and interning the other half — interning is still sequential, and is the next
+thing worth attacking. Validation is 0.153s, of which about 60% is path
+evaluation.
 
-So the next lever is the parser, not the validator. Within validation, the
-remaining candidates are a conformance-only path that skips building a report
-when the caller only wants a boolean, and parallelising across focus nodes,
-which are independent. Neither is likely to show up end to end until parsing
-improves.
+A conformance-only path that skips building a report, and rayon across focus
+nodes, are both available but would move ~17% of the runtime.
 
 This is also a workload that favours a compiled engine: a small shapes graph,
 many focus nodes, and cheap constraints. Shapes dominated by SPARQL constraints
