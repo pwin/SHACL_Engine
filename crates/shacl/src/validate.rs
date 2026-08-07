@@ -218,11 +218,19 @@ impl Engine<'_> {
             // Each of these admits a list of alternatives; a value conforms if
             // it matches any one of them.
             Constraint::Class(classes) => {
-                // The subclass closures are resolved once for the whole
-                // relation rather than per value node.
-                let subs: Vec<Vec<TermId>> =
-                    classes.iter().map(|&c| self.subclasses(c)).collect();
-                per_value!(|value| subs.iter().any(|s| self.is_instance(value, s)));
+                // Materialise the instance set once and test membership by
+                // binary search, rather than probing `rdf:type` per value node.
+                //
+                // The probe is the expensive part: it lands at a random offset
+                // in an index that runs to tens of megabytes on a large graph,
+                // so it misses cache nearly every time. The instance set is a
+                // few hundred kilobytes and stays resident.
+                let mut instances = Vec::new();
+                for &c in classes {
+                    self.instances_of(c, &mut instances);
+                }
+                sort_dedup(&mut instances);
+                per_value!(|value| instances.binary_search(&value).is_ok());
             }
             Constraint::Datatype(dts) => per_value!(|value| {
                 dts.iter().any(|&dt| {
