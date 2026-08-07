@@ -47,18 +47,21 @@ Ryzen/Windows 11, release build (`lto = "fat"`, `codegen-units = 1`), best of 3.
 
 | instances | triples | results | ours | pySHACL | speedup | ours: validate only |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 6,914 | 88 | 0.022s | 1.126s | **52×** | 0.0010s |
-| 10,000 | 69,027 | 997 | 0.069s | 7.036s | **102×** | 0.0080s |
-| 100,000 | 689,861 | 10,179 | 0.890s | 80.064s | **90×** | 0.1530s |
+| 1,000 | 6,914 | 88 | 0.020s | 1.169s | **58×** | 0.0010s |
+| 10,000 | 69,027 | 997 | 0.071s | 7.018s | **99×** | 0.0080s |
+| 100,000 | 689,861 | 10,179 | 0.781s | 81.399s | **104×** | 0.1540s |
 
 Both engines report identical result counts at every size.
 
-At the largest size that is ~775k triples/second end to end, or ~4.5M
-triples/second through the validator alone, against ~8.6k/second for pySHACL.
+At the largest size that is ~883k triples/second end to end, or ~4.5M
+triples/second through the validator alone, against ~8.5k/second for pySHACL.
 
 The 1,000-instance row is the odd one out because the file is too small to
-chunk and process startup is a visible share of 22ms. The gap widens with size
-until parsing dominates, then settles.
+chunk and process startup is a visible share of 20ms. The gap widens with size
+as the fixed costs amortise.
+
+For reference, where this started: 100k took 1.363s and was 58× ahead, with
+0.268s of that in the validator.
 
 Run the benchmark with nothing else on the machine. An earlier run taken while
 a compile was in progress inflated the 100k end-to-end figure by 70% while
@@ -137,15 +140,25 @@ a string per term, millions of them on a large graph, and the system allocator
 becomes the contention point once that runs across threads. It helps the
 sequential path too.
 
+### Then interning, which had become half of what was left
+
+Named and blank nodes stopped hashing twice — the string id already determines
+the term, so an array index replaces the lookup that used to follow. That was
+the smaller half. The rest was the hash function itself: the workload is
+hashing short strings two million times, and SipHash cost about 17% of load for
+quality it does not need. `foldhash` replaces it, with the seed still
+randomised per process, because a fixed-seed hash would let a crafted document
+collide every IRI into one bucket and turn interning quadratic.
+
 ### Where the time goes now
 
-Load is 0.72s of the 0.89s at 100k. Within load, the parse is now roughly half
-and interning the other half — interning is still sequential, and is the next
-thing worth attacking. Validation is 0.153s, of which about 60% is path
-evaluation.
+Load is 0.63s of the 0.78s at 100k, split roughly evenly between parsing and
+interning. Validation is 0.154s, of which about 60% is still path evaluation.
 
-A conformance-only path that skips building a report, and rayon across focus
-nodes, are both available but would move ~17% of the runtime.
+Remaining ideas, none of them obviously worth the complexity yet: parallelise
+interning (needs per-thread stores and a renumbering merge), a conformance-only
+path that skips building a report, and rayon across focus nodes. The last two
+together address about 20% of the runtime.
 
 This is also a workload that favours a compiled engine: a small shapes graph,
 many focus nodes, and cheap constraints. Shapes dominated by SPARQL constraints
