@@ -160,83 +160,60 @@ impl Path {
     /// originating focus node so per-row aggregates such as `sh:minCount`, and
     /// the focus node every violation must name, survive a compound path.
     pub fn eval_sets(&self, focus: &[TermId], data: &Graph) -> ValueSets {
+        self.eval_sets_dir(focus, data, false)
+    }
+
+    fn eval_sets_dir(&self, focus: &[TermId], data: &Graph, reverse: bool) -> ValueSets {
+        // The traversal state is a list of `(origin, reached)` pairs rather
+        // than one focus node at a time. Keeping the origin index alongside
+        // each reached node is what lets the whole frontier be sorted before
+        // the next step without losing track of which focus node it belongs
+        // to — and sorting the frontier is the entire point, since probing the
+        // index in sorted order is several times cheaper than probing it at
+        // random once the graph outgrows cache.
+        let pairs: Pairs = focus
+            .iter()
+            .enumerate()
+            .map(|(i, &n)| (i as u32, n))
+            .collect();
+        let mut reached = Pairs::new();
+        self.walk(&pairs, data, reverse, &mut reached);
+        normalise(&mut reached);
+
+        // `reached` is sorted by origin, so grouping into rows is a merge.
         let mut b = valueset::Builder::with_capacity(focus.len());
-        let mut row = Vec::new();
-        // One scratch pool for the whole relation. Compound paths need working
-        // buffers per nesting level, and allocating them per focus node dwarfed
-        // the traversal itself: a two-step sequence over 100k focus nodes meant
-        // 200k allocations to move a handful of terms each.
-        let mut scratch = Scratch::default();
-        for &f in focus {
-            row.clear();
-            self.expand(std::slice::from_ref(&f), data, &mut row, false, &mut scratch);
-            b.push_row(f, &row);
+        let mut i = 0;
+        for (origin, &f) in focus.iter().enumerate() {
+            b.start_row(f);
+            while i < reached.len() && reached[i].0 == origin as u32 {
+                b.push_value(reached[i].1);
+                i += 1;
+            }
+            b.end_row();
         }
         b.finish()
     }
 
     /// Appends the value nodes reachable from `focus` to `out`, deduplicated.
     pub fn eval(&self, focus: TermId, data: &Graph, out: &mut Vec<TermId>) {
-        let mut buf = Vec::new();
-        self.expand(
-            std::slice::from_ref(&focus),
-            data,
-            &mut buf,
-            false,
-            &mut Scratch::default(),
-        );
-        sort_dedup(&mut buf);
-        out.extend(buf);
+        let sets = self.eval_sets_dir(std::slice::from_ref(&focus), data, false);
+        out.extend(sets.row(0).values.iter().copied());
     }
 
     /// Evaluates the path backwards: the nodes from which `node` is reachable.
     pub fn eval_inverse(&self, node: TermId, data: &Graph, out: &mut Vec<TermId>) {
-        let mut buf = Vec::new();
-        self.expand(
-            std::slice::from_ref(&node),
-            data,
-            &mut buf,
-            true,
-            &mut Scratch::default(),
-        );
-        sort_dedup(&mut buf);
-        out.extend(buf);
+        let sets = self.eval_sets_dir(std::slice::from_ref(&node), data, true);
+        out.extend(sets.row(0).values.iter().copied());
     }
 
-    /// Expands a whole set of nodes through this path in one traversal.
-    ///
-    /// Set-to-set is the core primitive: a shape's focus nodes all follow the
-    /// same path, so the work is shared rather than repeated per node. `out` may
-    /// contain duplicates; callers deduplicate once at the end.
-    ///
-    /// `reverse` flips edge direction throughout, which is how `sh:inversePath`
-    /// over a compound path is handled without a second evaluator.
-    fn expand(
-        &self,
-        input: &[TermId],
-        data: &Graph,
-        out: &mut Vec<TermId>,
-        reverse: bool,
-        scratch: &mut Scratch,
-    ) {
+    /// Advances every pair one whole path, batched.
+    fn walk(&self, input: &Pairs, data: &Graph, reverse: bool, out: &mut Pairs) {
         match self {
-            Path::Predicate(p) => {
-                for &n in input {
-                    if reverse {
-                        out.extend(data.subjects(*p, n));
-                    } else {
-                        out.extend(data.objects(n, *p));
-                    }
-                }
-            }
-            Path::Inverse(inner) => inner.expand(input, data, out, !reverse, scratch),
+            Path::Predicate(p) => probe(input, *p, data, reverse, out),
+            Path::Inverse(inner) => inner.walk(input, data, !reverse, out),
             Path::Sequence(steps) => {
-                // Carry the whole frontier between steps. Reversed, the
-                // sequence itself is also walked back to front.
-                let mut frontier = scratch.take();
-                let mut next = scratch.take();
-                frontier.extend_from_slice(input);
-
+                let mut frontier = input.to_vec();
+                let mut next = Pairs::new();
                 let ordered: Box<dyn Iterator<Item = &Path>> = if reverse {
                     Box::new(steps.iter().rev())
                 } else {
@@ -244,101 +221,104 @@ impl Path {
                 };
                 for step in ordered {
                     next.clear();
-                    step.expand(&frontier, data, &mut next, reverse, scratch);
-                    sort_dedup(&mut next);
+                    step.walk(&frontier, data, reverse, &mut next);
+                    // Normalising between steps collapses the duplicate work
+                    // that two origins reaching the same node would otherwise
+                    // cause the next step to repeat.
+                    normalise(&mut next);
                     std::mem::swap(&mut frontier, &mut next);
                     if frontier.is_empty() {
-                        break;
+                        return;
                     }
                 }
                 out.extend_from_slice(&frontier);
-                scratch.give(frontier);
-                scratch.give(next);
             }
             Path::Alternative(alts) => {
                 for alt in alts {
-                    alt.expand(input, data, out, reverse, scratch);
+                    alt.walk(input, data, reverse, out);
                 }
             }
             Path::ZeroOrMore(inner) => {
                 out.extend_from_slice(input);
-                inner.closure(input, data, out, reverse, scratch);
+                inner.closure(input, data, reverse, out);
             }
-            Path::OneOrMore(inner) => inner.closure(input, data, out, reverse, scratch),
+            Path::OneOrMore(inner) => inner.closure(input, data, reverse, out),
             Path::ZeroOrOne(inner) => {
                 out.extend_from_slice(input);
-                inner.expand(input, data, out, reverse, scratch);
+                inner.walk(input, data, reverse, out);
             }
         }
     }
 
-    /// Transitive closure over the whole input set at once.
+    /// Transitive closure over the whole pair list at once.
     ///
-    /// Expanding the entire frontier per round rather than running a separate
-    /// traversal per focus node shares the overlapping work between them, and
-    /// bounds the round count by the graph's depth rather than by the number of
-    /// focus nodes.
-    fn closure(
-        &self,
-        input: &[TermId],
-        data: &Graph,
-        out: &mut Vec<TermId>,
-        reverse: bool,
-        scratch: &mut Scratch,
-    ) {
-        let mut frontier = scratch.take();
-        let mut seen = scratch.take();
-        let mut next = scratch.take();
-        frontier.extend_from_slice(input);
+    /// One fixpoint serves every origin, so overlapping traversals are walked
+    /// once rather than once per focus node, and the round count is bounded by
+    /// the graph's depth.
+    fn closure(&self, input: &Pairs, data: &Graph, reverse: bool, out: &mut Pairs) {
+        let mut seen = Pairs::new();
+        let mut frontier = input.to_vec();
+        let mut next = Pairs::new();
 
         while !frontier.is_empty() {
             next.clear();
-            self.expand(&frontier, data, &mut next, reverse, scratch);
-            sort_dedup(&mut next);
-            // Drop anything already expanded, which is what terminates on a
-            // cyclic graph.
-            next.retain(|n| seen.binary_search(n).is_err());
+            self.walk(&frontier, data, reverse, &mut next);
+            normalise(&mut next);
+            // Dropping pairs already expanded is what terminates on a cycle.
+            next.retain(|p| seen.binary_search(p).is_err());
             if next.is_empty() {
-                break;
+                return;
             }
             out.extend_from_slice(&next);
             seen.extend_from_slice(&next);
-            sort_dedup(&mut seen);
+            normalise(&mut seen);
             std::mem::swap(&mut frontier, &mut next);
         }
-        scratch.give(frontier);
-        scratch.give(seen);
-        scratch.give(next);
-    }
-}
-
-/// A pool of reusable buffers for compound path evaluation.
-///
-/// Path evaluation runs once per focus node, so anything allocated inside it is
-/// allocated hundreds of thousands of times over a large graph. Buffers are
-/// borrowed and returned instead, keeping their capacity across rows.
-#[derive(Debug, Default)]
-struct Scratch {
-    free: Vec<Vec<TermId>>,
-}
-
-impl Scratch {
-    #[inline]
-    fn take(&mut self) -> Vec<TermId> {
-        self.free.pop().unwrap_or_default()
     }
 
-    #[inline]
-    fn give(&mut self, mut buf: Vec<TermId>) {
-        buf.clear();
-        self.free.push(buf);
-    }
 }
+
+/// `(origin index, node reached)`. The origin is an index into the focus slice
+/// rather than the focus term itself, so a focus node appearing twice — as it
+/// does when `sh:property` feeds values from two parents — stays two rows.
+type Pairs = Vec<(u32, TermId)>;
 
 #[inline]
-fn sort_dedup(v: &mut Vec<TermId>) {
-    v.sort_unstable();
-    v.dedup();
+fn normalise(pairs: &mut Pairs) {
+    pairs.sort_unstable();
+    pairs.dedup();
+}
+
+/// Advances every pair one predicate, probing the index in sorted node order.
+///
+/// This is where the batching pays. The frontier is re-sorted by the node being
+/// probed, so the index is walked forwards rather than jumped around, and all
+/// origins that reached the same node share a single probe instead of each
+/// repeating it.
+fn probe(input: &Pairs, p: TermId, data: &Graph, reverse: bool, out: &mut Pairs) {
+    // Sorted by node first, so equal nodes are adjacent.
+    let mut by_node: Vec<(TermId, u32)> = input.iter().map(|&(o, n)| (n, o)).collect();
+    by_node.sort_unstable();
+
+    let mut i = 0;
+    while i < by_node.len() {
+        let node = by_node[i].0;
+        let start = i;
+        while i < by_node.len() && by_node[i].0 == node {
+            i += 1;
+        }
+        let origins = &by_node[start..i];
+
+        if reverse {
+            for t in data.subjects(p, node) {
+                out.extend(origins.iter().map(|&(_, o)| (o, t)));
+            }
+        } else {
+            for t in data.objects(node, p) {
+                out.extend(origins.iter().map(|&(_, o)| (o, t)));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
