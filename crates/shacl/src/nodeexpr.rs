@@ -246,6 +246,22 @@ fn eval_at(
         return Ok(values);
     }
 
+    // `sparql:someFunction ( a b )` exposes the SPARQL function library as a
+    // node expression. Rather than reimplementing sixty-odd builtins, the call
+    // is rebuilt as a SPARQL expression and handed to the evaluator.
+    if let Some((func, args_list)) = sparql_call(node, ctx, store) {
+        let args = g
+            .list(args_list, ctx.vocab)
+            .ok_or_else(|| Error::Shape("a sparql: call needs a list of arguments".into()))?;
+        let mut values = Vec::new();
+        for arg in args {
+            // Each argument is itself a node expression. Only its first value
+            // participates: SPARQL functions take terms, not sequences.
+            values.push(sub!(arg, focus).into_iter().next());
+        }
+        return eval_sparql_call(&func, &values, store);
+    }
+
     // A blank node heading an RDF list is a sequence of expressions, evaluated
     // and concatenated. `()` is `rdf:nil`, an IRI, so it is a constant and
     // never reaches here.
@@ -265,6 +281,105 @@ fn eval_at(
     }
 
     Err(Error::Shape("unsupported node expression".into()))
+}
+
+/// The `sparql:` namespace, whose predicates name SPARQL functions.
+const SPARQL_NS: &str = "http://www.w3.org/ns/sparql#";
+
+/// Finds a `sparql:` function call on `node`, as `(local name, argument list)`.
+fn sparql_call(node: TermId, ctx: &Ctx<'_>, store: &TermStore) -> Option<(String, TermId)> {
+    ctx.exprs.predicate_objects(node).find_map(|(p, o)| {
+        let iri = store.iri(p)?;
+        let local = iri.strip_prefix(SPARQL_NS)?;
+        Some((local.to_string(), o))
+    })
+}
+
+/// Rebuilds a `sparql:` call as SPARQL expression text and evaluates it.
+///
+/// The argument terms are written in N-Triples form, which is a subset of
+/// SPARQL term syntax, so no separate serialiser is needed.
+fn eval_sparql_call(
+    func: &str,
+    args: &[Option<TermId>],
+    store: &mut TermStore,
+) -> Result<Vec<TermId>> {
+    // An argument that produced no value makes the whole call undefined.
+    let mut rendered = Vec::with_capacity(args.len());
+    for a in args {
+        match a {
+            Some(t) => rendered.push(store.to_oxrdf(*t).to_string()),
+            None => return Ok(Vec::new()),
+        }
+    }
+
+    let expr = match sparql_operator(func) {
+        // Infix and prefix operators have no call syntax in SPARQL.
+        Some(Operator::Infix(op)) if rendered.len() == 2 => {
+            format!("({} {} {})", rendered[0], op, rendered[1])
+        }
+        Some(Operator::Prefix(op)) if rendered.len() == 1 => {
+            format!("({}{})", op, rendered[0])
+        }
+        Some(_) => {
+            return Err(Error::Shape(format!(
+                "sparql:{func} was given {} arguments",
+                rendered.len()
+            )))
+        }
+        None => format!("{}({})", sparql_function_name(func), rendered.join(", ")),
+    };
+
+    // An empty WHERE yields exactly one solution, so the expression is
+    // evaluated once with nothing bound.
+    let query = crate::sparql::parse_query("", &format!("SELECT ({expr} AS ?r) WHERE {{}}"))?;
+    let empty = crate::model::GraphBuilder::new().build();
+    let rows = crate::sparql::run(&query, &[], &empty, store)?;
+
+    // A function that errors binds nothing, which is an empty sequence rather
+    // than a failure — `sparql:bound` of an unbound variable relies on this.
+    let Some(term) = rows.first().and_then(|r| r.get("r")).cloned() else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![store.intern_oxrdf(term.as_ref(), crate::model::scope::SPARQL)])
+}
+
+enum Operator {
+    Infix(&'static str),
+    Prefix(&'static str),
+}
+
+/// Operator aliases. SHACL names these as functions, but SPARQL only has
+/// syntax for them.
+fn sparql_operator(func: &str) -> Option<Operator> {
+    Some(match func {
+        "greater-than" => Operator::Infix(">"),
+        "greater-than-or-equal" => Operator::Infix(">="),
+        "less-than" => Operator::Infix("<"),
+        "less-than-or-equal" => Operator::Infix("<="),
+        "equals" => Operator::Infix("="),
+        "not-equals" => Operator::Infix("!="),
+        "plus" => Operator::Infix("+"),
+        "subtract" => Operator::Infix("-"),
+        "multiply" => Operator::Infix("*"),
+        "divide" => Operator::Infix("/"),
+        "logical-and" => Operator::Infix("&&"),
+        "logical-or" => Operator::Infix("||"),
+        "unary-minus" => Operator::Prefix("-"),
+        "unary-plus" => Operator::Prefix("+"),
+        "logical-not" => Operator::Prefix("!"),
+        _ => return None,
+    })
+}
+
+/// The SPARQL spelling of a function whose SHACL name differs.
+fn sparql_function_name(func: &str) -> &str {
+    match func {
+        "encode" => "ENCODE_FOR_URI",
+        "uri" => "IRI",
+        "sameValue" => "sameTerm",
+        other => other,
+    }
 }
 
 fn subclasses(ctx: &Ctx<'_>, class: TermId) -> Vec<TermId> {

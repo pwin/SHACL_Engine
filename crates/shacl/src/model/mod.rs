@@ -17,6 +17,8 @@ pub use vocab::Vocab;
 pub mod scope {
     pub const DATA: u32 = 0;
     pub const SHAPES: u32 = 1;
+    /// Terms minted by SPARQL evaluation, which belong to no source document.
+    pub const SPARQL: u32 = 8;
     /// First scope handed out to additional documents (imports, test files).
     pub const FIRST_DYNAMIC: u32 = 16;
 }
