@@ -9,10 +9,12 @@
 //! 3. **Compile once, validate many.** A shapes graph is compiled into a flat
 //!    IR before validation begins, so no shape lookup touches RDF again.
 
+pub mod datatypes;
 pub mod error;
 pub mod model;
 pub mod path;
 pub mod report;
+pub mod shapes;
 pub mod validate;
 pub mod valueset;
 

@@ -184,7 +184,15 @@ fn run_one(
             Ok(r) => r,
             Err(e) => return Status::Error(format!("validation failed: {e}")),
         };
-        return compare(&expected.report, &actual, manifest, store, vocab, &expected.disallowed);
+        return compare(
+            &expected.report,
+            &actual,
+            manifest,
+            manifest,
+            store,
+            vocab,
+            &expected.disallowed,
+        );
     }
 
     let (Some(data_path), Some(shapes_path)) = (data_path, shapes_path) else {
@@ -217,15 +225,31 @@ fn run_one(
         Ok(r) => r,
         Err(e) => return Status::Error(format!("validation failed: {e}")),
     };
-    compare(&expected.report, &actual, shapes_ref, store, vocab, &expected.disallowed)
+    compare(
+        &expected.report,
+        &actual,
+        manifest,
+        shapes_ref,
+        store,
+        vocab,
+        &expected.disallowed,
+    )
 }
 
 // --------------------------------------------------------------- comparison
 
+/// Compares the two reports.
+///
+/// `expected_graph` and `actual_graph` are usually the same document, but when
+/// a test names an external shapes graph they differ: the expected report's
+/// `sh:resultPath` blank nodes live in the manifest, while the actual report's
+/// live in the shapes graph. Each side must compile its paths against the graph
+/// that actually contains them.
 fn compare(
     expected: &ValidationReport,
     actual: &ValidationReport,
-    shapes: &Graph,
+    expected_graph: &Graph,
+    actual_graph: &Graph,
     store: &TermStore,
     vocab: &Vocab,
     disallowed: &[TermId],
@@ -241,12 +265,12 @@ fn compare(
     let mut want: Vec<String> = expected
         .results
         .iter()
-        .map(|r| fingerprint(r, shapes, store, vocab))
+        .map(|r| fingerprint(r, expected_graph, store, vocab))
         .collect();
     let mut got: Vec<String> = actual
         .results
         .iter()
-        .map(|r| fingerprint(r, shapes, store, vocab))
+        .map(|r| fingerprint(r, actual_graph, store, vocab))
         .collect();
     want.sort();
     got.sort();
@@ -363,7 +387,7 @@ fn w3c_test_suites() {
 
 /// Guards against regressions: the pass count must never drop below this.
 /// Raise it as the engine gains coverage.
-const BASELINE_PASSING: usize = 0;
+const BASELINE_PASSING: usize = 219;
 
 #[test]
 fn progress() {
