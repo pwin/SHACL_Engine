@@ -387,7 +387,7 @@ fn w3c_test_suites() {
 
 /// Guards against regressions: the pass count must never drop below this.
 /// Raise it as the engine gains coverage.
-const BASELINE_PASSING: usize = 239;
+const BASELINE_PASSING: usize = 257;
 
 #[test]
 fn progress() {

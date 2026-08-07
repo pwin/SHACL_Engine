@@ -612,6 +612,79 @@ impl Engine<'_> {
                     }
                 }
             }
+
+            Constraint::Sparql(sc) => self.eval_sparql(shape, sc, sets, out)?,
+        }
+        Ok(())
+    }
+
+    /// Runs a `sh:sparql` constraint once per focus node.
+    ///
+    /// A `sh:select` faults for every solution it returns; a `sh:ask` faults
+    /// when it answers false. Solutions may name the offending value and path
+    /// through `?value` and `?path`, which override the shape's own.
+    fn eval_sparql(
+        &self,
+        shape: &Shape,
+        sc: &crate::sparql::SparqlConstraint,
+        sets: &ValueSets,
+        out: &mut Vec<ValidationResult>,
+    ) -> Result<()> {
+        let v = self.vocab;
+        let severity = sc.severity.unwrap_or(shape.severity);
+
+        for row in sets.rows() {
+            let this = crate::sparql::to_term(row.focus, self.store);
+            let solutions =
+                crate::sparql::run(&sc.query, &[("this", this)], self.data, self.store)?;
+
+            // ASK inverts: answering true means the constraint is satisfied.
+            let failures: Vec<_> = if sc.is_ask {
+                if solutions.is_empty() {
+                    vec![crate::sparql::empty_solution()]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                solutions
+            };
+
+            for solution in failures {
+                let mut r = ValidationResult::new(
+                    row.focus,
+                    v.sh_SPARQLConstraintComponent,
+                    severity,
+                )
+                .with_path(shape.path_node)
+                .with_source_shape(shape.node);
+                r.source_constraint = Some(sc.source);
+                r.messages.clone_from(&sc.message);
+                if r.messages.is_empty() {
+                    r.messages.clone_from(&shape.messages);
+                }
+
+                // A solution may override the focus node, value and path. Terms
+                // the query invented rather than read are not in the store and
+                // simply do not appear in the report.
+                if let Some(t) = solution.get("this") {
+                    if let Some(id) = crate::sparql::from_term(t.as_ref(), self.store) {
+                        r.focus_node = id;
+                    }
+                }
+                // A solution that says nothing about the offending value faults
+                // the focus node itself, which is what the suite's expected
+                // reports contain for queries projecting only `$this`.
+                r.value = match solution.get("value") {
+                    Some(t) => crate::sparql::from_term(t.as_ref(), self.store),
+                    None => Some(r.focus_node),
+                };
+                if let Some(t) = solution.get("path") {
+                    if let Some(id) = crate::sparql::from_term(t.as_ref(), self.store) {
+                        r.path = Some(id);
+                    }
+                }
+                out.push(r);
+            }
         }
         Ok(())
     }

@@ -113,6 +113,37 @@ impl Path {
         Ok(Path::Sequence(steps))
     }
 
+    /// Renders the path as SPARQL property path syntax.
+    ///
+    /// SHACL substitutes `$PATH` into a SPARQL constraint textually rather than
+    /// binding it as a variable, because a compound path is syntax, not a term:
+    /// `$this $PATH ?value` with an inverse path has to become `^<p>`, which no
+    /// variable binding could express.
+    pub fn to_sparql(&self, store: &TermStore) -> String {
+        match self {
+            Path::Predicate(p) => format!("<{}>", store.iri(*p).unwrap_or_default()),
+            Path::Inverse(inner) => format!("^{}", inner.to_sparql(store)),
+            Path::Sequence(steps) => format!(
+                "({})",
+                steps
+                    .iter()
+                    .map(|s| s.to_sparql(store))
+                    .collect::<Vec<_>>()
+                    .join("/")
+            ),
+            Path::Alternative(alts) => format!(
+                "({})",
+                alts.iter()
+                    .map(|a| a.to_sparql(store))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ),
+            Path::ZeroOrMore(inner) => format!("({})*", inner.to_sparql(store)),
+            Path::OneOrMore(inner) => format!("({})+", inner.to_sparql(store)),
+            Path::ZeroOrOne(inner) => format!("({})?", inner.to_sparql(store)),
+        }
+    }
+
     /// True if this is a bare predicate path, which the validator special-cases.
     #[inline]
     pub fn as_predicate(&self) -> Option<TermId> {

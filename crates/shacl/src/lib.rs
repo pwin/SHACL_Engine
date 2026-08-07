@@ -15,6 +15,7 @@ pub mod model;
 pub mod path;
 pub mod report;
 pub mod shapes;
+pub mod sparql;
 pub mod validate;
 pub mod valueset;
 

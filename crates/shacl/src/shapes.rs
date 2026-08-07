@@ -135,6 +135,10 @@ pub enum Constraint {
     /// one constraint that reads the whole relation rather than a row. Several
     /// paths form a composite key.
     UniqueValuesFor(Vec<Path>),
+
+    /// A `sh:sparql` constraint. Boxed because the parsed query dwarfs every
+    /// other variant, and would otherwise set the size of all of them.
+    Sparql(Box<crate::sparql::SparqlConstraint>),
 }
 
 impl Constraint {
@@ -182,6 +186,7 @@ impl Constraint {
             Self::RootClass(_) => v.sh_RootClassConstraintComponent,
             Self::SomeValue(_) => v.sh_SomeValueConstraintComponent,
             Self::UniqueValuesFor(_) => v.sh_UniqueValuesForConstraintComponent,
+            Self::Sparql(_) => v.sh_SPARQLConstraintComponent,
         }
     }
 
@@ -407,18 +412,21 @@ impl<'a> Compiler<'a> {
             .map(|s| s == "true")
             .unwrap_or(false);
 
-        let mut shape = Shape {
+        // Constraints are compiled before the shape is assembled because a
+        // `sh:sparql` constraint needs the path, to expand `$PATH`.
+        let targets = self.compile_targets(node);
+        let constraints = self.compile_constraints(node, path.as_ref())?;
+
+        Ok(Shape {
             node,
             path,
             path_node,
-            targets: self.compile_targets(node),
-            constraints: Vec::new(),
+            targets,
+            constraints,
             severity,
             messages: g.objects(node, v.sh_message).collect(),
             deactivated,
-        };
-        shape.constraints = self.compile_constraints(node)?;
-        Ok(shape)
+        })
     }
 
     fn compile_targets(&self, node: TermId) -> Vec<Target> {
@@ -441,7 +449,11 @@ impl<'a> Compiler<'a> {
         targets
     }
 
-    fn compile_constraints(&mut self, node: TermId) -> Result<Vec<Constraint>> {
+    fn compile_constraints(
+        &mut self,
+        node: TermId,
+        path: Option<&Path>,
+    ) -> Result<Vec<Constraint>> {
         let v = self.vocab;
         let g = self.graph;
         let mut out = Vec::new();
@@ -657,7 +669,63 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::UniqueValuesFor(paths));
         }
 
+        // --- SPARQL based
+        for node_c in g.objects(node, v.sh_sparql) {
+            out.push(Constraint::Sparql(Box::new(
+                self.compile_sparql(node_c, path)?,
+            )));
+        }
+
         Ok(out)
+    }
+
+    /// Compiles a `sh:SPARQLConstraint`, parsing its query once so validation
+    /// never re-parses.
+    fn compile_sparql(
+        &self,
+        node: TermId,
+        path: Option<&Path>,
+    ) -> Result<crate::sparql::SparqlConstraint> {
+        use crate::sparql;
+        let v = self.vocab;
+        let g = self.graph;
+
+        let (text, is_ask) = match g.object(node, v.sh_select) {
+            Some(t) => (t, false),
+            None => match g.object(node, v.sh_ask) {
+                Some(t) => (t, true),
+                None => {
+                    return Err(Error::Shape(
+                        "sh:sparql needs either sh:select or sh:ask".into(),
+                    ))
+                }
+            },
+        };
+        let text = self
+            .store
+            .lexical_form(text)
+            .ok_or_else(|| Error::Shape("SPARQL query is not a string".into()))?;
+
+        // `$PATH` is a textual substitution, not a pre-bound variable: for a
+        // property shape it stands for the path's SPARQL syntax, which for
+        // anything but a bare predicate cannot be a term.
+        let text = match path {
+            Some(p) if text.contains("$PATH") => {
+                text.replace("$PATH", &p.to_sparql(self.store))
+            }
+            _ => text.to_string(),
+        };
+
+        let header = sparql::prefix_header(node, g, self.store, v);
+        let query = sparql::parse_query(&header, &text)?;
+
+        Ok(sparql::SparqlConstraint {
+            query,
+            is_ask,
+            source: node,
+            message: g.objects(node, v.sh_message).collect(),
+            severity: g.object(node, v.sh_severity),
+        })
     }
 
     /// Reads a boolean-valued shape parameter, absent meaning false.

@@ -17,6 +17,19 @@ impl TermId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// The raw handle. Only for callers that must address terms outside the
+    /// store, such as the SPARQL adapter's side table for computed terms.
+    #[inline]
+    pub fn as_raw(self) -> u32 {
+        self.0
+    }
+
+    /// Rebuilds a handle from [`TermId::as_raw`].
+    #[inline]
+    pub fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
 }
 
 /// What an interned term actually is.
@@ -260,6 +273,36 @@ impl TermStore {
     pub fn get_named_node(&self, iri: &str) -> Option<TermId> {
         let s = self.strings.get(iri)?;
         self.lookup.get(&TermData::NamedNode(s)).copied()
+    }
+
+    /// Looks up any already-interned term without growing the store.
+    ///
+    /// A term absent here cannot appear in any graph built from this store, so
+    /// callers matching against the data can treat `None` as "matches nothing"
+    /// rather than as an error.
+    pub fn get_term(&self, term: TermRef<'_>) -> Option<TermId> {
+        let data = match term {
+            TermRef::NamedNode(n) => TermData::NamedNode(self.strings.get(n.as_str())?),
+            TermRef::BlankNode(_) => {
+                // Blank node labels are scope-prefixed on the way in, so an
+                // externally-supplied label has no meaningful identity here.
+                return None;
+            }
+            TermRef::Literal(l) => TermData::Literal {
+                lex: self.strings.get(l.value())?,
+                datatype: self.get_named_node(l.datatype().as_str())?,
+                lang: match l.language() {
+                    Some(t) => Some(self.strings.get(t)?),
+                    None => None,
+                },
+                dir: l.direction().map(|d| match d {
+                    oxrdf::BaseDirection::Ltr => Direction::Ltr,
+                    oxrdf::BaseDirection::Rtl => Direction::Rtl,
+                }),
+            },
+            TermRef::Triple(_) => return None,
+        };
+        self.lookup.get(&data).copied()
     }
 
     /// Materialises an interned term back into an `oxrdf` term, for report
