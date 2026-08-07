@@ -279,8 +279,12 @@ impl Engine<'_> {
             }),
             Constraint::UniqueLang => {
                 for row in sets.rows() {
-                    let mut seen: Vec<&str> = Vec::new();
-                    let mut reported: Vec<&str> = Vec::new();
+                    // The key includes the RDF 1.2 base direction: "A"@ar,
+                    // "A"@ar--ltr and "A"@ar--rtl are three distinct tags, not
+                    // three uses of "ar".
+                    type LangKey<'k> = (&'k str, Option<crate::model::term::Direction>);
+                    let mut seen: Vec<LangKey<'_>> = Vec::new();
+                    let mut reported: Vec<LangKey<'_>> = Vec::new();
                     for &value in row.values {
                         let Some(tag) = self.store.language(value) else {
                             continue;
@@ -288,13 +292,14 @@ impl Engine<'_> {
                         if tag.is_empty() {
                             continue;
                         }
-                        if seen.contains(&tag) {
-                            if !reported.contains(&tag) {
-                                reported.push(tag);
+                        let key = (tag, self.store.direction(value));
+                        if seen.contains(&key) {
+                            if !reported.contains(&key) {
+                                reported.push(key);
                                 out.push(self.result(shape, component, row.focus));
                             }
                         } else {
-                            seen.push(tag);
+                            seen.push(key);
                         }
                     }
                 }
@@ -486,6 +491,127 @@ impl Engine<'_> {
                 }
             }
             Constraint::In(items) => per_value!(|value| items.contains(&value)),
+
+            // --- SHACL 1.2
+            Constraint::MinListLength(n) => {
+                per_value!(|value| self.list_len(value).is_some_and(|l| l >= *n as usize))
+            }
+            Constraint::MaxListLength(n) => {
+                per_value!(|value| self.list_len(value).is_some_and(|l| l <= *n as usize))
+            }
+            Constraint::MemberShape(inner) => {
+                for row in sets.rows() {
+                    for &value in row.values {
+                        let Some(members) = self.data.list(value, v) else {
+                            // Not a list at all: fault the value itself, with
+                            // nothing to nest underneath.
+                            out.push(self.result(shape, component, row.focus).with_value(value));
+                            continue;
+                        };
+                        let mut nested = Vec::new();
+                        self.validate_shape(*inner, &members, &mut nested, stack)?;
+                        if !nested.is_empty() {
+                            let mut r =
+                                self.result(shape, component, row.focus).with_value(value);
+                            r.details = nested;
+                            out.push(r);
+                        }
+                    }
+                }
+            }
+            Constraint::UniqueMembers => {
+                for row in sets.rows() {
+                    for &value in row.values {
+                        let Some(members) = self.data.list(value, v) else {
+                            out.push(self.result(shape, component, row.focus).with_value(value));
+                            continue;
+                        };
+                        // One detail per member that occurs more than once.
+                        let mut seen: Vec<TermId> = Vec::new();
+                        let mut dupes: Vec<TermId> = Vec::new();
+                        for m in members {
+                            if seen.contains(&m) {
+                                if !dupes.contains(&m) {
+                                    dupes.push(m);
+                                }
+                            } else {
+                                seen.push(m);
+                            }
+                        }
+                        if !dupes.is_empty() {
+                            let mut r =
+                                self.result(shape, component, row.focus).with_value(value);
+                            r.details = dupes
+                                .into_iter()
+                                .map(|m| {
+                                    self.result(shape, component, row.focus).with_value(m)
+                                })
+                                .collect();
+                            out.push(r);
+                        }
+                    }
+                }
+            }
+            Constraint::SingleLine => per_value!(|value| {
+                self.store
+                    .lexical_form(value)
+                    .is_some_and(|s| !s.contains(is_line_break))
+            }),
+            Constraint::SubsetOf(p) => {
+                for row in sets.rows() {
+                    let superset = self.path_values(row.focus, p);
+                    for &value in row.values {
+                        if !superset.contains(&value) {
+                            out.push(self.result(shape, component, row.focus).with_value(value));
+                        }
+                    }
+                }
+            }
+            Constraint::RootClass(root) => {
+                let below = self.subclasses(*root);
+                per_value!(|value| below.contains(&value));
+            }
+            Constraint::SomeValue(inner) => {
+                for row in sets.rows() {
+                    let mut any = false;
+                    for &value in row.values {
+                        if self.conforms(*inner, value, stack)? {
+                            any = true;
+                            break;
+                        }
+                    }
+                    if !any {
+                        out.push(self.result(shape, component, row.focus));
+                    }
+                }
+            }
+            Constraint::UniqueValuesFor(paths) => {
+                // Uniqueness is a property of the focus set as a whole, so this
+                // is evaluated across rows rather than within one.
+                let keys: Vec<(TermId, Vec<Vec<TermId>>)> = sets
+                    .rows()
+                    .map(|row| {
+                        let key = paths
+                            .iter()
+                            .map(|p| self.path_values(row.focus, p))
+                            .collect();
+                        (row.focus, key)
+                    })
+                    .collect();
+                for (i, (focus, key)) in keys.iter().enumerate() {
+                    // An absent key cannot clash with anything.
+                    if key.iter().any(|k| k.is_empty()) {
+                        continue;
+                    }
+                    let clashes = keys
+                        .iter()
+                        .enumerate()
+                        .any(|(j, (_, other))| j != i && other == key);
+                    if clashes {
+                        out.push(self.result(shape, component, *focus));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -503,6 +629,12 @@ impl Engine<'_> {
             return None;
         }
         self.store.lexical_form(t).map(|s| s.chars().count())
+    }
+
+    /// The length of the RDF collection headed by `t`, or `None` if it is not a
+    /// well-formed list — which the list constraints treat as a violation.
+    fn list_len(&self, t: TermId) -> Option<usize> {
+        self.data.list(t, self.vocab).map(|items| items.len())
     }
 
     /// The value nodes of `focus` under the compared path, as a set.
@@ -565,6 +697,12 @@ fn node_kind_matches(kind: TermKind, wanted: NodeKind) -> bool {
         NodeKind::BlankNodeOrLiteral => matches!(kind, TermKind::Blank | TermKind::Literal),
         NodeKind::IriOrLiteral => matches!(kind, TermKind::Iri | TermKind::Literal),
     }
+}
+
+/// The characters `sh:singleLine` forbids: line feed, carriage return, form
+/// feed and vertical tab.
+fn is_line_break(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{000C}' | '\u{000B}')
 }
 
 fn sort_dedup(v: &mut Vec<TermId>) {

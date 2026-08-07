@@ -30,9 +30,20 @@ pub enum TermData {
         datatype: TermId,
         /// `Some` only for `rdf:langString`.
         lang: Option<StrId>,
+        /// RDF 1.2 base direction. Part of the term's identity: `"A"@ar`,
+        /// `"A"@ar--ltr` and `"A"@ar--rtl` are three distinct literals, which
+        /// `sh:uniqueLang` has to tell apart.
+        dir: Option<Direction>,
     },
     /// An RDF 1.2 triple term; indexes into [`TermStore::triple_terms`].
     Triple(u32),
+}
+
+/// The base direction of a directional language-tagged string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    Ltr,
+    Rtl,
 }
 
 /// The kind of an RDF term, as `sh:nodeKind` understands it.
@@ -109,6 +120,16 @@ impl TermStore {
     }
 
     pub fn literal(&mut self, lex: &str, datatype: &str, lang: Option<&str>) -> TermId {
+        self.literal_with_direction(lex, datatype, lang, None)
+    }
+
+    pub fn literal_with_direction(
+        &mut self,
+        lex: &str,
+        datatype: &str,
+        lang: Option<&str>,
+        dir: Option<Direction>,
+    ) -> TermId {
         let lex = self.strings.intern(lex);
         let lang = lang.map(|l| self.strings.intern(l));
         let datatype = self.named_node(datatype);
@@ -116,6 +137,7 @@ impl TermStore {
             lex,
             datatype,
             lang,
+            dir,
         })
     }
 
@@ -130,9 +152,15 @@ impl TermStore {
         match term {
             TermRef::NamedNode(n) => self.named_node(n.as_str()),
             TermRef::BlankNode(b) => self.blank_node(scope, b.as_str()),
-            TermRef::Literal(l) => {
-                self.literal(l.value(), l.datatype().as_str(), l.language())
-            }
+            TermRef::Literal(l) => self.literal_with_direction(
+                l.value(),
+                l.datatype().as_str(),
+                l.language(),
+                l.direction().map(|d| match d {
+                    oxrdf::BaseDirection::Ltr => Direction::Ltr,
+                    oxrdf::BaseDirection::Rtl => Direction::Rtl,
+                }),
+            ),
             TermRef::Triple(t) => {
                 let s = self.intern_oxrdf(TermRef::from(t.subject.as_ref()), scope);
                 let p = self.named_node(t.predicate.as_str());
@@ -211,6 +239,15 @@ impl TermStore {
         }
     }
 
+    /// The base direction of a directional language-tagged string.
+    #[inline]
+    pub fn direction(&self, id: TermId) -> Option<Direction> {
+        match self.terms[id.index()] {
+            TermData::Literal { dir, .. } => dir,
+            _ => None,
+        }
+    }
+
     #[inline]
     pub fn triple_parts(&self, id: TermId) -> Option<[TermId; 3]> {
         match self.terms[id.index()] {
@@ -246,14 +283,25 @@ impl TermStore {
                 lex,
                 datatype,
                 lang,
+                dir,
             } => {
                 let value = self.strings.resolve(lex);
-                let lit = match lang {
-                    Some(l) => LiteralRef::new_language_tagged_literal_unchecked(
+                let lit = match (lang, dir) {
+                    (Some(l), Some(d)) => {
+                        return Term::Literal(oxrdf::Literal::new_directional_language_tagged_literal_unchecked(
+                            value,
+                            self.strings.resolve(l),
+                            match d {
+                                Direction::Ltr => oxrdf::BaseDirection::Ltr,
+                                Direction::Rtl => oxrdf::BaseDirection::Rtl,
+                            },
+                        ));
+                    }
+                    (Some(l), None) => LiteralRef::new_language_tagged_literal_unchecked(
                         value,
                         self.strings.resolve(l),
                     ),
-                    None => LiteralRef::new_typed_literal(
+                    (None, _) => LiteralRef::new_typed_literal(
                         value,
                         NamedNodeRef::new_unchecked(self.iri(datatype).unwrap_or("")),
                     ),
@@ -326,6 +374,24 @@ mod tests {
         assert_eq!(s.language(en), Some("en"));
         assert_eq!(s.language(int), None);
         assert_eq!(s.kind(int), TermKind::Literal);
+    }
+
+    #[test]
+    fn base_direction_is_part_of_a_literal_s_identity() {
+        // "A"@ar, "A"@ar--ltr and "A"@ar--rtl are three distinct literals.
+        // Collapsing them would make sh:uniqueLang see false duplicates.
+        let mut s = TermStore::new();
+        const LS: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+        let plain = s.literal_with_direction("A", LS, Some("ar"), None);
+        let ltr = s.literal_with_direction("A", LS, Some("ar"), Some(Direction::Ltr));
+        let rtl = s.literal_with_direction("A", LS, Some("ar"), Some(Direction::Rtl));
+
+        assert_ne!(plain, ltr);
+        assert_ne!(ltr, rtl);
+        assert_eq!(s.direction(ltr), Some(Direction::Ltr));
+        assert_eq!(s.direction(plain), None);
+        // The language tag itself is unchanged by the direction.
+        assert_eq!(s.language(ltr), Some("ar"));
     }
 
     #[test]

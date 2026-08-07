@@ -120,6 +120,21 @@ pub enum Constraint {
     },
     HasValue(TermId),
     In(Vec<TermId>),
+
+    // SHACL 1.2. The list constraints treat each value node as the head of an
+    // RDF collection; a value that is not a well-formed list always faults.
+    MinListLength(u32),
+    MaxListLength(u32),
+    MemberShape(ShapeId),
+    UniqueMembers,
+    SingleLine,
+    SubsetOf(Path),
+    RootClass(TermId),
+    SomeValue(ShapeId),
+    /// Values must be unique *across* the shape's focus nodes, so this is the
+    /// one constraint that reads the whole relation rather than a row. Several
+    /// paths form a composite key.
+    UniqueValuesFor(Vec<Path>),
 }
 
 impl Constraint {
@@ -158,6 +173,15 @@ impl Constraint {
             Self::Closed { .. } => v.sh_ClosedConstraintComponent,
             Self::HasValue(_) => v.sh_HasValueConstraintComponent,
             Self::In(_) => v.sh_InConstraintComponent,
+            Self::MinListLength(_) => v.sh_MinListLengthConstraintComponent,
+            Self::MaxListLength(_) => v.sh_MaxListLengthConstraintComponent,
+            Self::MemberShape(_) => v.sh_MemberShapeConstraintComponent,
+            Self::UniqueMembers => v.sh_UniqueMembersConstraintComponent,
+            Self::SingleLine => v.sh_SingleLineConstraintComponent,
+            Self::SubsetOf(_) => v.sh_SubsetOfConstraintComponent,
+            Self::RootClass(_) => v.sh_RootClassConstraintComponent,
+            Self::SomeValue(_) => v.sh_SomeValueConstraintComponent,
+            Self::UniqueValuesFor(_) => v.sh_UniqueValuesForConstraintComponent,
         }
     }
 
@@ -595,7 +619,54 @@ impl<'a> Compiler<'a> {
             out.push(Constraint::In(items));
         }
 
+        // --- SHACL 1.2
+        for t in g.objects(node, v.sh_minListLength) {
+            out.push(Constraint::MinListLength(self.uint(t, "sh:minListLength")?));
+        }
+        for t in g.objects(node, v.sh_maxListLength) {
+            out.push(Constraint::MaxListLength(self.uint(t, "sh:maxListLength")?));
+        }
+        for t in g.objects(node, v.sh_memberShape) {
+            let id = self.shape_id(t)?;
+            out.push(Constraint::MemberShape(id));
+        }
+        if self.flag(node, v.sh_uniqueMembers) {
+            out.push(Constraint::UniqueMembers);
+        }
+        if self.flag(node, v.sh_singleLine) {
+            out.push(Constraint::SingleLine);
+        }
+        for t in g.objects(node, v.sh_subsetOf) {
+            out.push(Constraint::SubsetOf(Path::compile(t, g, self.store, v)?));
+        }
+        for t in g.objects(node, v.sh_rootClass) {
+            out.push(Constraint::RootClass(t));
+        }
+        for t in g.objects(node, v.sh_someValue) {
+            let id = self.shape_id(t)?;
+            out.push(Constraint::SomeValue(id));
+        }
+        for t in g.objects(node, v.sh_uniqueValuesFor) {
+            // A list here is a composite key — several paths that must be
+            // unique in combination — not a single sequence path.
+            let paths = self
+                .alternatives(t)
+                .into_iter()
+                .map(|p| Path::compile(p, g, self.store, v))
+                .collect::<Result<Vec<_>>>()?;
+            out.push(Constraint::UniqueValuesFor(paths));
+        }
+
         Ok(out)
+    }
+
+    /// Reads a boolean-valued shape parameter, absent meaning false.
+    fn flag(&self, node: TermId, pred: TermId) -> bool {
+        self.graph
+            .object(node, pred)
+            .and_then(|t| self.store.lexical_form(t))
+            .map(|s| s == "true")
+            .unwrap_or(false)
     }
 
     /// The qualified value shapes of this shape's siblings.

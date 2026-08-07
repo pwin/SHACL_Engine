@@ -59,6 +59,22 @@ impl Path {
 
         let sub = |n: TermId| Self::compile_at(n, shapes, store, vocab, depth + 1);
 
+        // The list form is tested first. A blank node can carry both
+        // `rdf:first` and, say, `sh:inversePath`; the suite pins the sequence
+        // reading as the winner in that case.
+        if shapes.object(node, vocab.rdf_first).is_some() {
+            let items = shapes
+                .list(node, vocab)
+                .ok_or_else(|| Error::Shape("blank node is not a valid property path".into()))?;
+            if items.len() < 2 {
+                return Err(Error::Shape(
+                    "a sequence path needs at least two steps".into(),
+                ));
+            }
+            let steps = items.into_iter().map(sub).collect::<Result<Vec<_>>>()?;
+            return Ok(Path::Sequence(steps));
+        }
+
         if let Some(inner) = shapes.object(node, vocab.sh_inversePath) {
             return Ok(Path::Inverse(Box::new(sub(inner)?)));
         }
@@ -436,6 +452,23 @@ mod tests {
         let mut f = Fixture::new(&format!("{PREFIX} ex:S sh:path ex:p . ex:a ex:p ex:b ."));
         let p = f.path().unwrap();
         assert!(f.eval_sets(&p, &[]).is_empty());
+    }
+
+    #[test]
+    fn the_list_reading_wins_when_a_node_is_both_a_list_and_a_path_operator() {
+        // A blank node carrying rdf:first *and* sh:inversePath is ambiguous;
+        // the suite pins the sequence reading as correct.
+        let mut f = Fixture::new(&format!(
+            "{PREFIX} @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+             ex:S sh:path [ rdf:first ex:p ; rdf:rest ( ex:q ) ; sh:inversePath ex:p ] .
+             ex:a ex:p ex:m . ex:m ex:q ex:z ."
+        ));
+        let p = f.path().unwrap();
+        assert!(
+            matches!(p, Path::Sequence(_)),
+            "expected a sequence, got {p:?}"
+        );
+        assert_eq!(f.eval(&p, "http://ex/a"), vec!["http://ex/z"]);
     }
 
     #[test]
