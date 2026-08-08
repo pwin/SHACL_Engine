@@ -180,6 +180,59 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
     header
 }
 
+/// Rejects queries SHACL declares incompatible with pre-binding.
+///
+/// The spec rules out `VALUES`, `MINUS` and `SERVICE` outright, and forbids
+/// re-binding a pre-bound variable with `BIND`. These are failures rather than
+/// violations: the shape cannot be evaluated at all, so answering either way
+/// would be a guess.
+fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
+    let pattern = match query {
+        Query::Select { pattern, .. } | Query::Ask { pattern, .. } => pattern,
+        _ => return Ok(()),
+    };
+    let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
+    if let Some(what) = unsupported_in(pattern, &names) {
+        return Err(Error::Sparql(format!(
+            "{what} cannot be combined with SHACL pre-binding"
+        )));
+    }
+    Ok(())
+}
+
+fn unsupported_in(
+    p: &spargebra::algebra::GraphPattern,
+    prebound: &[&str],
+) -> Option<&'static str> {
+    use spargebra::algebra::GraphPattern as G;
+    let recurse = |x: &G| unsupported_in(x, prebound);
+    match p {
+        G::Values { .. } => Some("VALUES"),
+        G::Minus { .. } => Some("MINUS"),
+        G::Service { .. } => Some("SERVICE"),
+        G::Extend {
+            inner, variable, ..
+        } => {
+            if prebound.contains(&variable.as_str()) {
+                return Some("re-binding a pre-bound variable");
+            }
+            recurse(inner)
+        }
+        G::Join { left, right }
+        | G::Union { left, right }
+        | G::LeftJoin { left, right, .. } => recurse(left).or_else(|| recurse(right)),
+        G::Filter { inner, .. }
+        | G::Graph { inner, .. }
+        | G::OrderBy { inner, .. }
+        | G::Project { inner, .. }
+        | G::Distinct { inner }
+        | G::Reduced { inner }
+        | G::Slice { inner, .. }
+        | G::Group { inner, .. } => recurse(inner),
+        _ => None,
+    }
+}
+
 /// Substitutes pre-bound variables into the query algebra.
 ///
 /// Doing this here rather than handing the bindings to the evaluator matters
@@ -430,6 +483,8 @@ pub fn run(
     graph: &Graph,
     store: &TermStore,
 ) -> Result<Vec<HashMap<String, Term>>> {
+    reject_unsupported(query, bindings)?;
+
     let adapter = DataAdapter::new(graph, store);
     let evaluator = QueryEvaluator::new();
     let substituted = substitute(query, bindings);

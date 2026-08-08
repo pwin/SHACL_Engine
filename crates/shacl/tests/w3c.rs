@@ -271,6 +271,12 @@ fn run_one(
     let data_path = resolve(manifest.object(action, vocab.sht_dataGraph), store);
     let shapes_path = resolve(manifest.object(action, vocab.sht_shapesGraph), store);
 
+    // `mf:result sht:Failure` says the shape cannot be evaluated at all, so the
+    // expected outcome is an error rather than a report. Parsing it as a report
+    // would silently read as "conforms, with no results".
+    let failure = store.named_node(&format!("{}Failure", shacl::model::vocab::SHT));
+    let expects_failure = result_node == failure;
+
     let expected = ValidationReport::parse(result_node, manifest, store, vocab);
 
     let self_path = manifest_path.canonicalize().ok();
@@ -283,7 +289,15 @@ fn run_one(
     // majority of the suite and needs no extra loading.
     if same_as_manifest(&data_path) && same_as_manifest(&shapes_path) {
         let actual = match shacl::validate::validate(manifest, manifest, store, vocab) {
+            Ok(r) if expects_failure => {
+                return Status::Mismatch(format!(
+                    "expected a failure, but validation produced {} result(s)",
+                    r.results.len()
+                ))
+            }
             Ok(r) => r,
+            // A failure was the expected outcome.
+            Err(_) if expects_failure => return Status::Pass,
             Err(e) => return Status::Error(format!("validation failed: {e}")),
         };
         return compare(
@@ -324,7 +338,14 @@ fn run_one(
     let shapes_ref = shapes.as_ref().unwrap_or(&data);
 
     let actual = match shacl::validate::validate(&data, shapes_ref, store, vocab) {
+        Ok(r) if expects_failure => {
+            return Status::Mismatch(format!(
+                "expected a failure, but validation produced {} result(s)",
+                r.results.len()
+            ))
+        }
         Ok(r) => r,
+        Err(_) if expects_failure => return Status::Pass,
         Err(e) => return Status::Error(format!("validation failed: {e}")),
     };
     compare(
@@ -489,7 +510,7 @@ fn w3c_test_suites() {
 
 /// Guards against regressions: the pass count must never drop below this.
 /// Raise it as the engine gains coverage.
-const BASELINE_PASSING: usize = 392;
+const BASELINE_PASSING: usize = 414;
 
 #[test]
 fn progress() {

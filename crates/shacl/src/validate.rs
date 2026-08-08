@@ -565,7 +565,16 @@ impl Engine<'_> {
                         };
                         let reifiers: Vec<TermId> =
                             self.data.subjects(v.rdf_reifies, tt).collect();
-                        self.validate_shape(*inner, &reifiers, out, stack, store)?;
+                        // Like `sh:node`, the nested results are not reported
+                        // directly: a non-conforming reifier faults the value
+                        // whose statement it annotates.
+                        let mut nested = Vec::new();
+                        self.validate_shape(*inner, &reifiers, &mut nested, stack, store)?;
+                        if !nested.is_empty() {
+                            out.push(
+                                self.result(shape, component, row.focus).with_value(value),
+                            );
+                        }
                     }
                 }
             }
@@ -964,6 +973,9 @@ impl Engine<'_> {
     /// instance of the parent may not use what only the subclass declares.
     fn closed_by_types(&self, focus: TermId, ignored: &[TermId]) -> Vec<TermId> {
         let mut allowed = ignored.to_vec();
+        // The types themselves are what select the permitted set, so stating
+        // them cannot be what makes a node violate it.
+        allowed.push(self.vocab.rdf_type);
         let mut queue: Vec<TermId> = self.data.objects(focus, self.vocab.rdf_type).collect();
         let mut seen = queue.clone();
         while let Some(class) = queue.pop() {

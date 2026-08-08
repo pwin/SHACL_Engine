@@ -243,7 +243,18 @@ fn eval_at(
                 Some(prev) => prev.into_iter().filter(|x| vs.contains(x)).collect(),
             });
         }
-        return Ok(acc.unwrap_or_default());
+        // An intersection is a set: duplicates in the operands must not
+        // survive into the result.
+        let mut out = acc.unwrap_or_default();
+        let mut seen = Vec::new();
+        out.retain(|v| {
+            let fresh = !seen.contains(v);
+            if fresh {
+                seen.push(*v);
+            }
+            fresh
+        });
+        return Ok(out);
     }
     if let Some(other) = g.object(node, s.remove) {
         let a = operand!();
@@ -420,15 +431,24 @@ fn eval_at(
                 };
                 return Ok(vec![bool_literal(yes, store)]);
             }
-            // SHACL names these but SPARQL has no such functions; they reduce
-            // to a language-range match over the tag.
-            "hasLang" | "hasLangdir" => {
+            // SHACL names these but SPARQL has no such functions. `hasLang`
+            // asks whether a literal carries a given language range;
+            // `hasLangdir` takes one argument and asks only whether a base
+            // direction is present at all.
+            "hasLang" => {
                 let (Some(Some(v)), Some(Some(want))) = (values.first(), values.get(1)) else {
                     return Ok(Vec::new());
                 };
                 let tag = store.language(*v).unwrap_or_default().to_string();
                 let want = store.lexical_form(*want).unwrap_or_default().to_string();
                 let yes = crate::datatypes::language_matches(&tag, &want);
+                return Ok(vec![bool_literal(yes, store)]);
+            }
+            "hasLangdir" => {
+                let Some(Some(v)) = values.first() else {
+                    return Ok(Vec::new());
+                };
+                let yes = store.direction(*v).is_some();
                 return Ok(vec![bool_literal(yes, store)]);
             }
             _ => {}
