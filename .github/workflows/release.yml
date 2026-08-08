@@ -9,9 +9,14 @@ on:
   workflow_dispatch:
     inputs:
       publish_to_pypi:
-        description: "Also upload the distributions to PyPI (cannot be undone)"
+        description: "Upload the distributions to an index (run this against a tag, not a branch)"
         type: boolean
         default: false
+      pypi_repository:
+        description: "Which index. Rehearse on testpypi first: a version can never be re-uploaded."
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
 
 permissions:
   contents: write
@@ -148,7 +153,10 @@ jobs:
   publish:
     needs: [cli, wheels, sdist]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Only on a tag push. A manual dispatch is how the PyPI upload is driven,
+    # and that has to be run against an existing tag — without this guard it
+    # would also rewrite the release that tag already published.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -179,7 +187,9 @@ jobs:
     needs: [cli, wheels, sdist]
     if: inputs.publish_to_pypi
     runs-on: ubuntu-latest
-    environment: pypi
+    # The environment name follows the chosen index, so each can carry its own
+    # protection rules and reviewers.
+    environment: ${{ inputs.pypi_repository }}
     permissions:
       id-token: write
     steps:
@@ -194,4 +204,15 @@ jobs:
           mkdir -p dist
           cp staged/wheels-*/*.whl staged/sdist/*.tar.gz dist/
           ls -la dist
+      # Dispatching from a branch would upload whatever that branch currently
+      # holds, under the version in Cargo.toml — which need not be what the tag
+      # of that version actually published.
+      - name: Refuse to publish from a branch
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/*) echo "publishing $GITHUB_REF_NAME" ;;
+            *) echo "::error::Run this workflow against a tag, not $GITHUB_REF_NAME"; exit 1 ;;
+          esac
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.pypi_repository == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
