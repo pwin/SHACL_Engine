@@ -44,10 +44,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          # Apple Silicon only. `macos-13` was the last free Intel runner and
+          # has been removed; the surviving Intel labels are large runners,
+          # which are billed even on public repositories. Intel Mac users can
+          # build the CLI from source, and the Python wheel below is universal
+          # so it covers them regardless.
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: .exe
@@ -90,7 +93,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+          # One universal2 wheel covers both Mac architectures, which is what
+          # lets the Intel runner go without leaving Intel users behind.
+          - os: macos-latest
+            target: universal2-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -103,6 +112,7 @@ jobs:
         with:
           command: build
           args: --release --out dist --manifest-path crates/shacl-python/Cargo.toml
+          target: ${{ matrix.target }}
           manylinux: auto
       # `--no-index` matters: `shacl` is a plausible name for an unrelated
       # project on PyPI, and without it a failed local build would quietly test
