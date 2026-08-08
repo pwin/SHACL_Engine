@@ -20,11 +20,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # `shacl-python` is excluded because it contains no Rust tests, and
@@ -53,7 +53,7 @@ jobs:
             ext: .exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -80,7 +80,7 @@ jobs:
           else
             tar czf "../dist/$NAME.tar.gz" "$NAME"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cli-${{ matrix.target }}
           path: dist/*
@@ -93,8 +93,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # One abi3 wheel per platform serves every CPython from 3.9 up, so the
@@ -113,7 +113,7 @@ jobs:
           python -m pip install --no-index --find-links dist --force-reinstall shacl
           python -m pip install pytest
           python -m pytest crates/shacl-python/tests -q
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
@@ -125,31 +125,34 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist --manifest-path crates/shacl-python/Cargo.toml
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
 
   publish:
-    needs: [cli, wheels]
+    needs: [cli, wheels, sdist]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: staged
+      # Collected by artefact directory rather than by filename. Each upload
+      # lands in its own subdirectory, so this cannot accidentally pick up or
+      # miss a file the way matching on `shacl-*` would.
       - name: Collect and checksum
         run: |
           mkdir -p dist
-          find staged -type f \( -name 'shacl-*' -o -name '*.whl' \) -exec cp {} dist/ \;
+          cp staged/cli-*/* staged/wheels-*/*.whl staged/sdist/*.tar.gz dist/
           (cd dist && sha256sum ./* > SHA256SUMS)
           ls -la dist
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
@@ -170,13 +173,15 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: staged
+      # Only the Python distributions. The CLI archives are also `.tar.gz` and
+      # must not be uploaded to PyPI, so this takes them from the artefact
+      # directories that hold Python builds rather than filtering by name.
       - name: Collect distributions
         run: |
           mkdir -p dist
-          find staged -type f \( -name '*.whl' -o -name '*.tar.gz' \) \
-            -not -name 'shacl-*-*-*.tar.gz' -exec cp {} dist/ \;
+          cp staged/wheels-*/*.whl staged/sdist/*.tar.gz dist/
           ls -la dist
       - uses: pypa/gh-action-pypi-publish@release/v1
