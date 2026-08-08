@@ -7,6 +7,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish_to_pypi:
+        description: "Also upload the distributions to PyPI (cannot be undone)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -113,6 +118,23 @@ jobs:
           name: wheels-${{ matrix.os }}
           path: dist/*.whl
 
+  # PyPI expects a source distribution alongside the wheels, so anyone on a
+  # platform with no wheel can still build from source. Only one is needed, so
+  # it is not part of the per-OS matrix.
+  sdist:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path crates/shacl-python/Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
   publish:
     needs: [cli, wheels]
     runs-on: ubuntu-latest
@@ -131,3 +153,30 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Deliberately not triggered by the tag. A PyPI upload cannot be undone —
+  # yanking hides a version but never frees it for re-use — so publishing is a
+  # separate, explicit act. Run this workflow manually with `publish_to_pypi`
+  # set, after the release artefacts have been looked at.
+  #
+  # Authentication is Trusted Publishing: PyPI is configured to trust this
+  # repository and workflow, and the job exchanges a short-lived OIDC token for
+  # upload rights. No API token is stored anywhere.
+  pypi:
+    needs: [cli, wheels, sdist]
+    if: inputs.publish_to_pypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+      - name: Collect distributions
+        run: |
+          mkdir -p dist
+          find staged -type f \( -name '*.whl' -o -name '*.tar.gz' \) \
+            -not -name 'shacl-*-*-*.tar.gz' -exec cp {} dist/ \;
+          ls -la dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
