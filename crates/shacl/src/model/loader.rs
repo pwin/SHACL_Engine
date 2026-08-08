@@ -31,15 +31,66 @@ pub fn path_to_base_iri(path: &Path) -> Result<String> {
     let abs = path
         .canonicalize()
         .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
-    let s = abs.to_string_lossy();
+    Ok(file_iri(&abs.to_string_lossy()))
+}
+
+/// Builds a `file:` IRI from an absolute path, as a pure function of the text.
+///
+/// Separated from [`path_to_base_iri`] so both platforms' path shapes can be
+/// tested anywhere — `canonicalize` only ever produces the host's own.
+fn file_iri(path: &str) -> String {
     // Windows canonicalisation yields a `\\?\C:\...` prefix; strip it and
     // normalise separators so the IRI is portable.
-    let s = s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/");
-    Ok(if s.starts_with('/') {
-        format!("file://{s}")
+    let s = path
+        .strip_prefix(r"\\?\")
+        .unwrap_or(path)
+        .replace('\\', "/");
+    let encoded = encode_iri_path(&s);
+    // A Unix path already starts with the separator that follows `file://`;
+    // a Windows one starts at the drive letter and needs it added.
+    if encoded.starts_with('/') {
+        format!("file://{encoded}")
     } else {
-        format!("file:///{s}")
-    })
+        format!("file:///{encoded}")
+    }
+}
+
+/// Percent-encodes the characters a path may contain but an IRI may not.
+///
+/// Without this, any path containing a space — `My Documents`, `Program
+/// Files` — produced an IRI the parser rejected outright, so the file could
+/// not be validated at all. `#` and `?` are worse than invalid: they are
+/// legal, and would silently truncate the IRI into a fragment or query.
+///
+/// Non-ASCII is left alone. That is the point of an IRI as against a URI, and
+/// it keeps accented path names readable.
+fn encode_iri_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            // `%` first: it introduces an escape, so a literal one must become
+            // `%25` or the result is ambiguous.
+            '%' => out.push_str("%25"),
+            ' ' => out.push_str("%20"),
+            '#' => out.push_str("%23"),
+            '?' => out.push_str("%3F"),
+            '[' => out.push_str("%5B"),
+            ']' => out.push_str("%5D"),
+            '"' => out.push_str("%22"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
+            '^' => out.push_str("%5E"),
+            '`' => out.push_str("%60"),
+            '{' => out.push_str("%7B"),
+            '|' => out.push_str("%7C"),
+            '}' => out.push_str("%7D"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                out.push_str(&format!("%{:02X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Parses `text` into `builder`, interning terms into `store`.
@@ -406,6 +457,51 @@ mod tests {
     #[test]
     fn chunking_declines_on_small_documents() {
         assert!(turtle_chunks("@prefix ex: <http://ex/> . ex:a ex:b ex:c .", 8).is_none());
+    }
+
+    #[test]
+    fn builds_file_iris_for_both_platform_path_shapes() {
+        // Both shapes are checked everywhere: `canonicalize` only ever yields
+        // the host's own, so testing whichever this machine produces would
+        // leave the other untested — which is how the mirror of this bug
+        // reached CI in the test harness.
+        assert_eq!(file_iri("/home/x/data.ttl"), "file:///home/x/data.ttl");
+        assert_eq!(
+            file_iri(r"\\?\C:\repos\data.ttl"),
+            "file:///C:/repos/data.ttl"
+        );
+        assert_eq!(file_iri("C:/repos/data.ttl"), "file:///C:/repos/data.ttl");
+    }
+
+    #[test]
+    fn percent_encodes_what_an_iri_cannot_hold() {
+        // A space made the IRI invalid outright, so the file simply could not
+        // be loaded.
+        assert_eq!(
+            file_iri("/home/my docs/data.ttl"),
+            "file:///home/my%20docs/data.ttl"
+        );
+        // `#` and `?` are legal in an IRI, which is worse: they would truncate
+        // the base into a fragment or query rather than fail loudly.
+        assert_eq!(file_iri("/a/b#c/d.ttl"), "file:///a/b%23c/d.ttl");
+        assert_eq!(file_iri("/a/b?c/d.ttl"), "file:///a/b%3Fc/d.ttl");
+        assert_eq!(file_iri("/a/100%/d.ttl"), "file:///a/100%25/d.ttl");
+        // Non-ASCII stays as it is; that is what distinguishes an IRI.
+        assert_eq!(file_iri("/tmp/café/d.ttl"), "file:///tmp/café/d.ttl");
+    }
+
+    #[test]
+    fn a_path_with_a_space_can_actually_be_loaded() {
+        let dir = std::env::temp_dir().join("shacl test dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.ttl");
+        std::fs::write(&file, "@prefix ex: <http://ex/> . <> ex:p ex:o .").unwrap();
+
+        let mut store = TermStore::new();
+        let graph = load_file(&file, 0, &mut store).expect("a space must not stop a load");
+        assert_eq!(graph.len(), 1);
+
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
