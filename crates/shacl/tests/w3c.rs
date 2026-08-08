@@ -19,7 +19,7 @@ use shacl::model::{Graph, TermId, TermStore, Vocab, loader};
 use shacl::path::Path as ShaclPath;
 use shacl::report::{ValidationReport, ValidationResult};
 
-/// Where the vendored suites live, relative to this crate.
+/// Where the bundled suites live, relative to this crate.
 const SUITES: &[(&str, &str)] = &[
     ("shacl12", "../../testsuite/shacl12/tests/manifest.ttl"),
     ("shacl10", "../../testsuite/shacl10/tests/manifest.ttl"),
@@ -480,7 +480,7 @@ fn w3c_test_suites() {
         collect_manifests(&root, &mut manifests);
         assert!(
             !manifests.is_empty(),
-            "no manifests found under {} — is the test suite vendored?",
+            "no manifests found under {} — is the test suite present?",
             root.display()
         );
 

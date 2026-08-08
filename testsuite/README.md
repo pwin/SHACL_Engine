@@ -1,4 +1,4 @@
-# Vendored W3C test suites
+# Bundled W3C test suites
 
 These directories are copied verbatim from the W3C [`w3c/data-shapes`][repo]
 repository and are **not** part of this project's own source.
@@ -8,7 +8,7 @@ repository and are **not** part of this project's own source.
 | `shacl10/` | `data-shapes-test-suite/` | SHACL 1.0 (2017 Recommendation) |
 | `shacl12/` | `shacl12-test-suite/` | SHACL 1.2 (core, node expressions, SPARQL, rules) |
 
-They are vendored rather than pulled in as a submodule so that a clone builds
+They are copied in rather than pulled in as a submodule so that a clone builds
 and tests without network access, and so a suite update lands as a reviewable
 commit rather than silently changing what conformance means.
 

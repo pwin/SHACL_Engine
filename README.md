@@ -11,8 +11,8 @@ with the W3C SHACL 1.0 and 1.2 test suites.
 | `crates/shacl-cli` | `shacl` command line binary |
 | `crates/shacl-python` | Python bindings (PyO3 + maturin) |
 | `benchmarks/` | Comparison against pySHACL |
-| `testsuite/shacl10` | Vendored W3C `data-shapes-test-suite` |
-| `testsuite/shacl12` | Vendored W3C `shacl12-test-suite` |
+| `testsuite/shacl10` | W3C `data-shapes-test-suite`, copied in |
+| `testsuite/shacl12` | W3C `shacl12-test-suite`, copied in |
 
 ## Performance
 
@@ -80,8 +80,14 @@ See [crates/shacl-python/README.md](crates/shacl-python/README.md).
 
 ## Licence
 
-[MIT](LICENSE-MIT). Copyright (c) 2026 pwin (Peter Winstanley).
+Dual licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your
+option. Copyright (c) 2026 pwin (Peter Winstanley).
 
-The vendored W3C test suites under `testsuite/` are not covered by that; they
+This is the Rust ecosystem's convention, and it exists to solve one problem:
+Apache 2.0 carries an express patent grant that MIT lacks, but is incompatible
+with GPLv2, which MIT is not. Offering both lets a GPLv2 project take the MIT
+terms and a patent-cautious one take Apache, excluding neither.
+
+The W3C test suites bundled under `testsuite/` are not covered by that; they
 are published by the W3C under their own licence — see
 [testsuite/README.md](testsuite/README.md).
