@@ -19,7 +19,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - run: cargo test --workspace
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # `shacl-python` is excluded because it contains no Rust tests, and
+      # building it here would link against libpython for no benefit — the
+      # `wheels` job builds it properly with `extension-module` and runs its
+      # pytest suite on every platform. Clippy and rustfmt still cover it,
+      # since neither links.
+      - run: cargo test --workspace --exclude shacl-python
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo fmt --all --check
 
