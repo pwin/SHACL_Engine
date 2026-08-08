@@ -1,0 +1,25 @@
+[package]
+name = "shacl-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Python bindings for the shacl validation engine"
+
+[lib]
+name = "shacl"
+# `cdylib` is what Python loads; `rlib` keeps the crate buildable as a normal
+# library, which is what lets `cargo build --workspace` cover it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Aliased: the extension module itself must be called `shacl`, which would
+# otherwise shadow this dependency.
+engine = { package = "shacl", path = "../shacl" }
+pyo3 = { version = "0.29", features = ["abi3-py39"] }
+
+[features]
+# Off by default so a plain `cargo build` links against libpython and succeeds.
+# maturin turns it on, which is when the module resolves its Python symbols at
+# load time instead — necessary for a wheel, fatal for a standalone link.
+extension-module = ["pyo3/extension-module"]

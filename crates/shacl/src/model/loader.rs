@@ -2,7 +2,8 @@
 
 use std::path::Path;
 
-use oxrdfio::{RdfFormat, RdfParser};
+pub use oxrdfio::RdfFormat;
+use oxrdfio::RdfParser;
 use rayon::prelude::*;
 
 use super::graph::{Graph, GraphBuilder};

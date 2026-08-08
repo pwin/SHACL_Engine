@@ -1,0 +1,26 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "shacl"
+description = "A high-performance SHACL validator"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/pwin/SHACL_Engine"
+
+[tool.maturin]
+# The extension is built from the workspace member, and targets the stable ABI
+# so one wheel serves every CPython from 3.9 up.
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
+module-name = "shacl"
