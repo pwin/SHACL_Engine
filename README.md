@@ -77,3 +77,12 @@ if not report:
 ```
 
 See [crates/shacl-python/README.md](crates/shacl-python/README.md).
+
+## Licence
+
+Dual licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE), at your
+option. Copyright (c) 2026 pwin (Peter Winstanley).
+
+The vendored W3C test suites under `testsuite/` are not covered by that; they
+are published by the W3C under their own licence — see
+[testsuite/README.md](testsuite/README.md).

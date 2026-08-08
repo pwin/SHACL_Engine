@@ -53,16 +53,28 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo build --release -p shacl-cli --target ${{ matrix.target }}
-      - name: Stage
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/shacl${{ matrix.ext }}" \
-             "dist/shacl-${{ matrix.target }}${{ matrix.ext }}"
       # A binary that cannot report its own version did not link correctly.
       - name: Smoke test
         shell: bash
-        run: ./dist/shacl-${{ matrix.target }}${{ matrix.ext }} --version
+        run: ./target/${{ matrix.target }}/release/shacl${{ matrix.ext }} --version
+      # Archived rather than shipped bare, for two reasons: a raw file
+      # downloaded from a release arrives without its executable bit, and the
+      # licences have to travel with the binary.
+      - name: Package
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ "$VERSION" = "$GITHUB_REF_NAME" ] && VERSION=dev
+          NAME="shacl-$VERSION-${{ matrix.target }}"
+          mkdir -p "staging/$NAME" dist
+          cp "target/${{ matrix.target }}/release/shacl${{ matrix.ext }}" "staging/$NAME/"
+          cp LICENSE-MIT LICENSE-APACHE README.md "staging/$NAME/"
+          cd staging
+          if [ -n "${{ matrix.ext }}" ]; then
+            7z a -tzip "../dist/$NAME.zip" "$NAME" >/dev/null
+          else
+            tar czf "../dist/$NAME.tar.gz" "$NAME"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.target }}
