@@ -137,6 +137,23 @@ impl Engine<'_> {
                 Target::Class(c) | Target::ImplicitClass(c) => self.instances_of(*c, &mut out),
                 Target::SubjectsOf(p) => out.extend(self.data.subjects_of(*p)),
                 Target::ObjectsOf(p) => out.extend(self.data.objects_of(*p)),
+                Target::Sparql(q) => {
+                    // The selector binds one variable per focus node. SHACL
+                    // names it `$this`, but a query is free to project
+                    // something else, so the sole binding is taken when there
+                    // is no `?this`.
+                    for row in crate::sparql::run(&q.query, &[], self.data, store)? {
+                        let picked = row
+                            .get("this")
+                            .or_else(|| row.values().next())
+                            .cloned();
+                        if let Some(t) = picked {
+                            if let Some(id) = crate::sparql::from_term(t.as_ref(), store) {
+                                out.push(id);
+                            }
+                        }
+                    }
+                }
                 Target::Where(shape_node) => {
                     // Every node in the data that conforms to the given shape.
                     let Some(id) = self.shapes.id_of(*shape_node) else {

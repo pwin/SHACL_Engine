@@ -49,7 +49,7 @@ impl NodeKind {
 }
 
 /// How a shape selects its focus nodes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Target {
     Node(TermId),
     Class(TermId),
@@ -60,6 +60,9 @@ pub enum Target {
     /// `sh:targetWhere`: every node in the data graph conforming to the shape
     /// declared at this node.
     Where(TermId),
+    /// `sh:target` naming a SPARQL selector: the focus nodes are whatever the
+    /// query returns.
+    Sparql(Box<crate::sparql::SparqlConstraint>),
 }
 
 /// A compiled constraint, with every operand already resolved.
@@ -464,16 +467,35 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn compile_targets(&self, node: TermId) -> Vec<Target> {
+    fn compile_targets(&mut self, node: TermId) -> Vec<Target> {
         let v = self.vocab;
         let g = self.graph;
         let mut targets = Vec::new();
 
-        targets.extend(g.objects(node, v.sh_targetNode).map(Target::Node));
+        // A selector node is handled below, not as a literal target.
+        targets.extend(
+            g.objects(node, v.sh_targetNode)
+                .filter(|&t| g.object(t, v.sh_select).is_none())
+                .map(Target::Node),
+        );
         targets.extend(g.objects(node, v.sh_targetClass).map(Target::Class));
         targets.extend(g.objects(node, v.sh_targetSubjectsOf).map(Target::SubjectsOf));
         targets.extend(g.objects(node, v.sh_targetObjectsOf).map(Target::ObjectsOf));
         targets.extend(g.objects(node, v.sh_targetWhere).map(Target::Where));
+
+        // Either `sh:target` or `sh:targetNode` may name a SPARQL selector
+        // instead of a term: `sh:targetNode [ sh:select ... ]` selects nodes by
+        // query rather than listing them.
+        let selectors: Vec<TermId> = g
+            .objects(node, v.sh_target)
+            .chain(g.objects(node, v.sh_targetNode))
+            .filter(|&t| g.object(t, v.sh_select).is_some())
+            .collect();
+        for t in selectors {
+            if let Ok(q) = self.compile_sparql(t, None) {
+                targets.push(Target::Sparql(Box::new(q)));
+            }
+        }
 
         // An IRI shape that is also a class targets its own instances.
         if self.store.is_iri(node)
@@ -495,13 +517,13 @@ impl<'a> Compiler<'a> {
         let mut out = Vec::new();
 
         // --- value type
-        for t in g.objects(node, v.sh_class) {
+        for t in self.objects_active(node, v.sh_class) {
             out.push(Constraint::Class(self.alternatives(t)));
         }
-        for t in g.objects(node, v.sh_datatype) {
+        for t in self.objects_active(node, v.sh_datatype) {
             out.push(Constraint::Datatype(self.alternatives(t)));
         }
-        for t in g.objects(node, v.sh_nodeKind) {
+        for t in self.objects_active(node, v.sh_nodeKind) {
             let kinds = self
                 .alternatives(t)
                 .into_iter()
@@ -515,35 +537,35 @@ impl<'a> Compiler<'a> {
         }
 
         // --- cardinality
-        for t in g.objects(node, v.sh_minCount) {
+        for t in self.objects_active(node, v.sh_minCount) {
             out.push(Constraint::MinCount(self.uint(t, "sh:minCount")?));
         }
-        for t in g.objects(node, v.sh_maxCount) {
+        for t in self.objects_active(node, v.sh_maxCount) {
             out.push(Constraint::MaxCount(self.uint(t, "sh:maxCount")?));
         }
 
         // --- value range
-        for t in g.objects(node, v.sh_minExclusive) {
+        for t in self.objects_active(node, v.sh_minExclusive) {
             out.push(Constraint::MinExclusive(t));
         }
-        for t in g.objects(node, v.sh_minInclusive) {
+        for t in self.objects_active(node, v.sh_minInclusive) {
             out.push(Constraint::MinInclusive(t));
         }
-        for t in g.objects(node, v.sh_maxExclusive) {
+        for t in self.objects_active(node, v.sh_maxExclusive) {
             out.push(Constraint::MaxExclusive(t));
         }
-        for t in g.objects(node, v.sh_maxInclusive) {
+        for t in self.objects_active(node, v.sh_maxInclusive) {
             out.push(Constraint::MaxInclusive(t));
         }
 
         // --- string based
-        for t in g.objects(node, v.sh_minLength) {
+        for t in self.objects_active(node, v.sh_minLength) {
             out.push(Constraint::MinLength(self.uint(t, "sh:minLength")?));
         }
-        for t in g.objects(node, v.sh_maxLength) {
+        for t in self.objects_active(node, v.sh_maxLength) {
             out.push(Constraint::MaxLength(self.uint(t, "sh:maxLength")?));
         }
-        for t in g.objects(node, v.sh_pattern) {
+        for t in self.objects_active(node, v.sh_pattern) {
             let flags = g
                 .object(node, v.sh_flags)
                 .and_then(|f| self.store.lexical_form(f))
@@ -557,7 +579,7 @@ impl<'a> Compiler<'a> {
                 source: t,
             });
         }
-        for t in g.objects(node, v.sh_languageIn) {
+        for t in self.objects_active(node, v.sh_languageIn) {
             let langs = g
                 .list(t, v)
                 .ok_or_else(|| Error::Shape("sh:languageIn is not a well-formed list".into()))?;
@@ -585,7 +607,7 @@ impl<'a> Compiler<'a> {
         }
 
         // --- logical
-        for t in g.objects(node, v.sh_not) {
+        for t in self.objects_active(node, v.sh_not) {
             let id = self.shape_id(t)?;
             out.push(Constraint::Not(id));
         }
@@ -607,15 +629,15 @@ impl<'a> Compiler<'a> {
         }
 
         // --- shape based
-        for t in g.objects(node, v.sh_node) {
+        for t in self.objects_active(node, v.sh_node) {
             let id = self.shape_id(t)?;
             out.push(Constraint::Node(id));
         }
-        for t in g.objects(node, v.sh_property) {
+        for t in self.objects_active(node, v.sh_property) {
             let id = self.shape_id(t)?;
             out.push(Constraint::Property(id));
         }
-        for t in g.objects(node, v.sh_qualifiedValueShape) {
+        for t in self.objects_active(node, v.sh_qualifiedValueShape) {
             let shape = self.shape_id(t)?;
             let min = g
                 .object(node, v.sh_qualifiedMinCount)
@@ -659,10 +681,10 @@ impl<'a> Compiler<'a> {
                 out.push(Constraint::Closed { ignored, by_types });
             }
         }
-        for t in g.objects(node, v.sh_hasValue) {
+        for t in self.objects_active(node, v.sh_hasValue) {
             out.push(Constraint::HasValue(t));
         }
-        for t in g.objects(node, v.sh_in) {
+        for t in self.objects_active(node, v.sh_in) {
             let items = g
                 .list(t, v)
                 .ok_or_else(|| Error::Shape("sh:in is not a well-formed list".into()))?;
@@ -670,17 +692,17 @@ impl<'a> Compiler<'a> {
         }
 
         // --- SHACL 1.2
-        for t in g.objects(node, v.sh_minListLength) {
+        for t in self.objects_active(node, v.sh_minListLength) {
             out.push(Constraint::MinListLength(self.uint(t, "sh:minListLength")?));
         }
-        for t in g.objects(node, v.sh_maxListLength) {
+        for t in self.objects_active(node, v.sh_maxListLength) {
             out.push(Constraint::MaxListLength(self.uint(t, "sh:maxListLength")?));
         }
-        for t in g.objects(node, v.sh_reifierShape) {
+        for t in self.objects_active(node, v.sh_reifierShape) {
             let id = self.shape_id(t)?;
             out.push(Constraint::ReifierShape(id));
         }
-        for t in g.objects(node, v.sh_memberShape) {
+        for t in self.objects_active(node, v.sh_memberShape) {
             let id = self.shape_id(t)?;
             out.push(Constraint::MemberShape(id));
         }
@@ -690,17 +712,17 @@ impl<'a> Compiler<'a> {
         if self.flag(node, v.sh_singleLine) {
             out.push(Constraint::SingleLine);
         }
-        for t in g.objects(node, v.sh_subsetOf) {
+        for t in self.objects_active(node, v.sh_subsetOf) {
             out.push(Constraint::SubsetOf(Path::compile(t, g, self.store, v)?));
         }
-        for t in g.objects(node, v.sh_rootClass) {
+        for t in self.objects_active(node, v.sh_rootClass) {
             out.push(Constraint::RootClass(t));
         }
-        for t in g.objects(node, v.sh_someValue) {
+        for t in self.objects_active(node, v.sh_someValue) {
             let id = self.shape_id(t)?;
             out.push(Constraint::SomeValue(id));
         }
-        for t in g.objects(node, v.sh_uniqueValuesFor) {
+        for t in self.objects_active(node, v.sh_uniqueValuesFor) {
             // A list here is a composite key — several paths that must be
             // unique in combination — not a single sequence path.
             let paths = self
@@ -719,10 +741,10 @@ impl<'a> Compiler<'a> {
         }
 
         // --- node expressions
-        for t in g.objects(node, v.sh_expression) {
+        for t in self.objects_active(node, v.sh_expression) {
             out.push(Constraint::Expression(t));
         }
-        for t in g.objects(node, v.sh_nodeByExpression) {
+        for t in self.objects_active(node, v.sh_nodeByExpression) {
             out.push(Constraint::NodeByExpression(t));
         }
 
@@ -850,6 +872,29 @@ impl<'a> Compiler<'a> {
             message: g.objects(node, v.sh_message).collect(),
             severity: g.object(node, v.sh_severity),
         })
+    }
+
+    /// The objects of `node pred ?o`, minus any statement annotated
+    /// `sh:deactivated true`.
+    ///
+    /// RDF 1.2 annotation syntax lets a single constraint be switched off
+    /// without removing it: `sh:datatype xsd:boolean {| sh:deactivated true |}`
+    /// reifies that one triple and marks the reifier. So deactivation is a
+    /// property of the statement, not of the shape.
+    fn objects_active(&self, node: TermId, pred: TermId) -> Vec<TermId> {
+        self.graph
+            .objects(node, pred)
+            .filter(|&o| !self.statement_deactivated(node, pred, o))
+            .collect()
+    }
+
+    fn statement_deactivated(&self, s: TermId, p: TermId, o: TermId) -> bool {
+        let Some(tt) = self.store.get_triple_term(s, p, o) else {
+            return false;
+        };
+        self.graph
+            .subjects(self.vocab.rdf_reifies, tt)
+            .any(|r| self.flag(r, self.vocab.sh_deactivated))
     }
 
     /// Reads a boolean-valued shape parameter, absent meaning false.
