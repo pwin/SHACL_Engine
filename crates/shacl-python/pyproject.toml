@@ -7,8 +7,8 @@ name = "shacl"
 description = "A high-performance SHACL validator"
 readme = "README.md"
 requires-python = ">=3.9"
-license = "MIT OR Apache-2.0"
-license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+license = "MIT"
+license-files = ["LICENSE-MIT"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",

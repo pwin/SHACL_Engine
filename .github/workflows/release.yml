@@ -68,7 +68,7 @@ jobs:
           NAME="shacl-$VERSION-${{ matrix.target }}"
           mkdir -p "staging/$NAME" dist
           cp "target/${{ matrix.target }}/release/shacl${{ matrix.ext }}" "staging/$NAME/"
-          cp LICENSE-MIT LICENSE-APACHE README.md "staging/$NAME/"
+          cp LICENSE-MIT README.md "staging/$NAME/"
           cd staging
           if [ -n "${{ matrix.ext }}" ]; then
             7z a -tzip "../dist/$NAME.zip" "$NAME" >/dev/null
