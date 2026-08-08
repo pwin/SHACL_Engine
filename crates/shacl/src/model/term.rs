@@ -69,6 +69,12 @@ pub enum TermKind {
 }
 
 /// Interner for RDF terms, shared across every graph in a validation run.
+///
+/// Cloning is cheap once only a shapes graph has been read — a few hundred
+/// terms — which is what lets a compiled shapes graph be validated against
+/// many data graphs concurrently: each run clones the store and grows its own
+/// copy, so the ids the compiled shapes hold stay valid without any sharing.
+#[derive(Clone)]
 pub struct TermStore {
     strings: Interner,
     terms: Vec<TermData>,

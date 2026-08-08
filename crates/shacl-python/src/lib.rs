@@ -14,8 +14,6 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::Mutex;
-
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 
@@ -87,23 +85,23 @@ impl Report {
     }
 }
 
-/// Everything one validation run needs, kept together because the term store
-/// is shared: ids from the shapes graph and the data graph are only comparable
-/// within one store.
-struct Inner {
+/// A compiled shapes graph, ready to validate against.
+///
+/// Every field is immutable after construction, so one instance can be shared
+/// across threads without a lock. Validation needs a *mutable* term store —
+/// the data graph has terms to intern — so each run clones this one and grows
+/// its own copy. The clone is cheap because a store holding only a shapes
+/// graph has a few hundred terms in it, and it is what keeps the ids the
+/// compiled shapes hold valid: ids are only comparable within one store.
+///
+/// It also bounds memory. Sharing one store across runs meant every data graph
+/// ever validated stayed interned in it.
+#[pyclass(frozen)]
+pub struct Shapes {
     store: TermStore,
     vocab: Vocab,
     shapes_graph: Graph,
     compiled: engine::shapes::Shapes,
-}
-
-/// A compiled shapes graph, ready to validate against.
-#[pyclass]
-pub struct Shapes {
-    // A `Mutex` rather than a plain field so the GIL can be released around
-    // validation: parsing runs across threads, and holding the GIL would
-    // serialise callers that are otherwise independent.
-    inner: Mutex<Inner>,
 }
 
 impl Shapes {
@@ -114,12 +112,10 @@ impl Shapes {
         let compiled = engine::shapes::Shapes::compile(&shapes_graph, &store, &vocab)
             .map_err(to_py_err)?;
         Ok(Self {
-            inner: Mutex::new(Inner {
-                store,
-                vocab,
-                shapes_graph,
-                compiled,
-            }),
+            store,
+            vocab,
+            shapes_graph,
+            compiled,
         })
     }
 }
@@ -159,10 +155,9 @@ impl Shapes {
     /// Validates a data graph read from a file.
     fn validate_file(&self, py: Python<'_>, path: PathBuf) -> PyResult<Report> {
         py.detach(|| {
-            let mut inner = self.inner.lock().unwrap();
-            let data = loader::load_file(&path, scope::DATA, &mut inner.store)
-                .map_err(to_py_err)?;
-            self.run(&mut inner, &data)
+            let mut store = self.store.clone();
+            let data = loader::load_file(&path, scope::DATA, &mut store).map_err(to_py_err)?;
+            self.run(&mut store, &data)
         })
     }
 
@@ -170,25 +165,25 @@ impl Shapes {
     #[pyo3(signature = (text, base = "http://example.org/data"))]
     fn validate_turtle(&self, py: Python<'_>, text: &str, base: &str) -> PyResult<Report> {
         py.detach(|| {
-            let mut inner = self.inner.lock().unwrap();
+            let mut store = self.store.clone();
             let mut b = engine::model::GraphBuilder::new();
             loader::parse_str(
                 text,
                 oxrdf_format_turtle(),
                 base,
                 scope::DATA,
-                &mut inner.store,
+                &mut store,
                 &mut b,
             )
             .map_err(to_py_err)?;
             let data = b.build();
-            self.run(&mut inner, &data)
+            self.run(&mut store, &data)
         })
     }
 
     /// The number of compiled shapes.
     fn __len__(&self) -> usize {
-        self.inner.lock().unwrap().compiled.len()
+        self.compiled.len()
     }
 
     fn __repr__(&self) -> String {
@@ -197,16 +192,16 @@ impl Shapes {
 }
 
 impl Shapes {
-    fn run(&self, inner: &mut Inner, data: &Graph) -> PyResult<Report> {
-        let Inner {
+    fn run(&self, store: &mut TermStore, data: &Graph) -> PyResult<Report> {
+        let vocab = &self.vocab;
+        let report = engine::validate::validate_in(
+            data,
+            &self.compiled,
+            &self.shapes_graph,
             store,
             vocab,
-            shapes_graph,
-            compiled,
-        } = inner;
-        let report =
-            engine::validate::validate_in(data, compiled, shapes_graph, store, vocab)
-                .map_err(to_py_err)?;
+        )
+        .map_err(to_py_err)?;
 
         let local = |t: engine::TermId| -> String {
             store
@@ -260,7 +255,12 @@ fn validate(py: Python<'_>, data_path: PathBuf, shapes_path: Option<PathBuf>) ->
     shapes.validate_file(py, data_path)
 }
 
-#[pymodule]
+/// `gil_used = false` declares the module safe for free-threaded CPython.
+/// Without it, importing into a `python3.14t` build makes the interpreter
+/// switch the GIL back on. It is sound here because `Shapes` is immutable and
+/// each validation works on its own cloned store; it is a no-op on the usual
+/// GIL-enabled builds.
+#[pymodule(gil_used = false)]
 fn shacl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Shapes>()?;
     m.add_class::<Report>()?;

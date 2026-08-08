@@ -16,7 +16,7 @@ use hashbrown::HashTable;
 pub struct StrId(pub(crate) u32);
 
 /// Append-only string arena with deduplication.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Interner {
     /// All interned bytes, concatenated. Never shrinks, so spans stay valid.
     buf: String,

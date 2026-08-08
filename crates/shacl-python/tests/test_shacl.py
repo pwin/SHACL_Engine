@@ -68,3 +68,33 @@ def test_errors_surface_as_exceptions():
         shacl.Shapes.from_turtle("this is not turtle @@@")
     with pytest.raises(IOError):
         shacl.Shapes.from_file("does-not-exist.ttl")
+
+
+def test_one_shapes_object_is_usable_from_many_threads():
+    """A single Shapes must be safe to share, not just safe to copy.
+
+    Validation clones the term store per run rather than locking a shared one,
+    so concurrent callers do not serialise on each other.
+    """
+    import concurrent.futures
+
+    shapes = shacl.Shapes.from_turtle(SHAPES)
+
+    def run(i):
+        return shapes.validate_turtle(VALID if i % 2 == 0 else INVALID).conforms
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        got = list(pool.map(run, range(64)))
+
+    assert got == [i % 2 == 0 for i in range(64)]
+
+
+def test_repeated_validation_does_not_accumulate_state():
+    """Results must not depend on how many runs came before.
+
+    The store used to be shared and mutated, so every data graph ever validated
+    stayed interned in it.
+    """
+    shapes = shacl.Shapes.from_turtle(SHAPES)
+    counts = {len(shapes.validate_turtle(INVALID)) for _ in range(20)}
+    assert counts == {2}

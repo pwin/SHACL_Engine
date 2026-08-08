@@ -59,7 +59,33 @@ Terms are returned as strings in N-Triples syntax — `<http://ex/a>`,
 That keeps the binding free of a dependency on any particular Python RDF
 library; parse them with whichever one you already use.
 
-The GIL is released around parsing and validation, so threads calling into
-separate `Shapes` objects run genuinely in parallel. A single `Shapes` is
-internally locked, because the term store it shares between the two graphs is
-not safe to mutate concurrently.
+## Threading
+
+A `Shapes` object is immutable and safe to share. Validation releases the GIL
+and clones the term store per run rather than locking a shared one, so
+concurrent callers do not serialise on each other.
+
+Measured on stock CPython 3.14 with the GIL enabled — 16 validations of a
+69k-triple graph through one shared `Shapes`:
+
+| threads | throughput |
+| ---: | ---: |
+| 1 | 7.8 runs/s |
+| 4 | 26.9 runs/s |
+| 8 | 27.8 runs/s |
+
+It plateaus at four because each validation already parses across threads
+internally, so the cores are busy either way.
+
+### Free-threaded builds
+
+The module declares `gil_used = false`, so it will not force the GIL back on
+when imported into a free-threaded interpreter (`python3.14t`). Note that
+free-threading is a separate *build*, not something a version number brings: a
+stock 3.14 still reports `sys._is_gil_enabled() == True`.
+
+There is little to gain from it here. The GIL is already released around the
+work, which is why the table above scales. Free-threading would only help code
+doing significant Python-level work in parallel as well — and it costs the
+single `abi3` wheel, since `abi3` is a no-op on free-threaded builds and PyO3
+falls back to a version-specific one.
