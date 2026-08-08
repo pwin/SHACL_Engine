@@ -46,7 +46,7 @@ sequence. Expected and actual reports are compared through one in-memory
 representation rather than by diffing serialised RDF; `sh:resultMessage` is
 excluded, since the spec leaves message text to the implementation.
 
-**416 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
+**417 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
 SPARQL-based constraints with pre-binding, user-declared constraint components,
 the node expression algebra, SPARQL-selected targets and RDF 1.2 annotations are
 all implemented. The ten that remain are listed in `tests/w3c.rs`.

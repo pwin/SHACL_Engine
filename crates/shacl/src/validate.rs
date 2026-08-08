@@ -976,8 +976,18 @@ impl Engine<'_> {
         let mut queue: Vec<TermId> = self.data.objects(focus, self.vocab.rdf_type).collect();
         let mut seen = queue.clone();
         while let Some(class) = queue.pop() {
+            // A class contributes what it declares as a shape in its own right…
             if let Some(id) = self.shapes.id_of(class) {
                 allowed.extend(self.property_paths(self.shapes.get(id)));
+            }
+            // …and what any shape aimed at it declares. A separate shape with
+            // `sh:targetClass` is describing the same instances, so closing
+            // over only the class-as-shape would reject properties the model
+            // plainly permits.
+            for shape_node in self.shapes_graph.subjects(self.vocab.sh_targetClass, class) {
+                if let Some(id) = self.shapes.id_of(shape_node) {
+                    allowed.extend(self.property_paths(self.shapes.get(id)));
+                }
             }
             for up in self.data.objects(class, self.vocab.rdfs_subClassOf) {
                 if !seen.contains(&up) {
@@ -990,21 +1000,43 @@ impl Engine<'_> {
         allowed
     }
 
-    /// The predicate paths a shape declares through `sh:property`.
+    /// The predicate paths a shape declares, following the shapes it composes
+    /// with.
+    ///
+    /// `sh:node` and the logical combinators pull in another shape's
+    /// properties as surely as `sh:property` does, so closing over only the
+    /// direct ones would reject what a composed shape plainly permits.
     fn property_paths(&self, shape: &Shape) -> Vec<TermId> {
-        shape
-            .constraints
-            .iter()
-            .filter_map(|c| match c {
-                Constraint::Property(id) => self
-                    .shapes
-                    .get(*id)
-                    .path
-                    .as_ref()
-                    .and_then(|p| p.as_predicate()),
-                _ => None,
-            })
-            .collect()
+        let mut out = Vec::new();
+        let mut queue = vec![shape];
+        let mut depth = 0;
+        while let Some(s) = queue.pop() {
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            for c in &s.constraints {
+                match c {
+                    Constraint::Property(id) => {
+                        if let Some(p) = self
+                            .shapes
+                            .get(*id)
+                            .path
+                            .as_ref()
+                            .and_then(|p| p.as_predicate())
+                        {
+                            out.push(p);
+                        }
+                    }
+                    Constraint::Node(id) => queue.push(self.shapes.get(*id)),
+                    Constraint::And(ids) | Constraint::Or(ids) | Constraint::Xone(ids) => {
+                        queue.extend(ids.iter().map(|id| self.shapes.get(*id)));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
     }
 
     /// Predicates a closed shape permits: those declared by its own property

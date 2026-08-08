@@ -49,12 +49,23 @@ fn collect_manifests(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Converts a `file:` IRI back into a path.
+///
+/// Only `file://` is stripped, never `file:///`. A Unix path arrives as
+/// `file:///home/x` and must keep its leading slash or it becomes relative,
+/// which silently resolved nothing and made the whole suite look empty. A
+/// Windows path arrives as `file:///C:/x`, where that same slash is spurious
+/// and has to go.
 fn iri_to_path(iri: &str) -> Option<PathBuf> {
-    let rest = iri
-        .strip_prefix("file:///")
-        .or_else(|| iri.strip_prefix("file://"))?;
+    let rest = iri.strip_prefix("file://")?;
     let decoded = percent_decode(rest);
-    Some(PathBuf::from(decoded))
+    let bytes = decoded.as_bytes();
+    let stripped = if bytes.len() > 2 && bytes[0] == b'/' && bytes[2] == b':' {
+        &decoded[1..]
+    } else {
+        &decoded[..]
+    };
+    Some(PathBuf::from(stripped))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -520,9 +531,32 @@ fn w3c_test_suites() {
     assert!(total > 0, "no tests were discovered");
 }
 
+#[test]
+fn file_iris_round_trip_on_both_platform_shapes() {
+    // Both forms are checked on every platform. Each host only ever produces
+    // one of them, so testing whichever the runner happens to make would have
+    // missed the bug this guards: a Unix path losing its leading slash turned
+    // every manifest include into an unresolvable relative path, and the suite
+    // reported nothing rather than failing.
+    assert_eq!(
+        iri_to_path("file:///home/runner/work/tests/manifest.ttl"),
+        Some(PathBuf::from("/home/runner/work/tests/manifest.ttl"))
+    );
+    assert_eq!(
+        iri_to_path("file:///C:/repos/tests/manifest.ttl"),
+        Some(PathBuf::from("C:/repos/tests/manifest.ttl"))
+    );
+    assert_eq!(
+        iri_to_path("file:///tmp/a%20b/manifest.ttl"),
+        Some(PathBuf::from("/tmp/a b/manifest.ttl")),
+        "percent escapes are decoded"
+    );
+    assert_eq!(iri_to_path("http://example.org/x.ttl"), None);
+}
+
 /// Guards against regressions: the pass count must never drop below this.
 /// Raise it as the engine gains coverage.
-const BASELINE_PASSING: usize = 416;
+const BASELINE_PASSING: usize = 417;
 
 #[test]
 fn progress() {
