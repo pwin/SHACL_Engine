@@ -193,8 +193,14 @@ mod tests {
         let g = sample();
         // `pos` is ordered by (predicate, object, subject), so subjects come
         // back grouped by object rather than sorted.
-        assert_eq!(g.subjects_of(t(1)).collect::<Vec<_>>(), vec![t(0), t(5), t(0)]);
-        assert_eq!(g.objects_of(t(1)).collect::<Vec<_>>(), vec![t(2), t(2), t(3)]);
+        assert_eq!(
+            g.subjects_of(t(1)).collect::<Vec<_>>(),
+            vec![t(0), t(5), t(0)]
+        );
+        assert_eq!(
+            g.objects_of(t(1)).collect::<Vec<_>>(),
+            vec![t(2), t(2), t(3)]
+        );
         assert_eq!(g.objects_of(t(99)).count(), 0);
     }
 

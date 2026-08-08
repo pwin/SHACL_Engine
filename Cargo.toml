@@ -28,9 +28,14 @@ clap = { version = "4", features = ["derive"] }
 [profile.release]
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# Symbols are worth a few megabytes and nothing else in a shipped binary.
+strip = true
+# Unwinding is deliberate. `panic = "abort"` would be marginally smaller, but
+# `panic` cannot be set per package, and the Python extension needs unwinding:
+# PyO3 turns a panic into a Python exception by catching it. Aborting would take
+# the whole interpreter down instead.
 
-# `bench` inherits from release but keeps unwinding so criterion can catch panics.
+# `bench` inherits from release.
 [profile.bench]
 lto = "fat"
 codegen-units = 1

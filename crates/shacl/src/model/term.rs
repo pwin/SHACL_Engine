@@ -404,14 +404,16 @@ impl TermStore {
                 let value = self.strings.resolve(lex);
                 let lit = match (lang, dir) {
                     (Some(l), Some(d)) => {
-                        return Term::Literal(oxrdf::Literal::new_directional_language_tagged_literal_unchecked(
-                            value,
-                            self.strings.resolve(l),
-                            match d {
-                                Direction::Ltr => oxrdf::BaseDirection::Ltr,
-                                Direction::Rtl => oxrdf::BaseDirection::Rtl,
-                            },
-                        ));
+                        return Term::Literal(
+                            oxrdf::Literal::new_directional_language_tagged_literal_unchecked(
+                                value,
+                                self.strings.resolve(l),
+                                match d {
+                                    Direction::Ltr => oxrdf::BaseDirection::Ltr,
+                                    Direction::Rtl => oxrdf::BaseDirection::Rtl,
+                                },
+                            ),
+                        );
                     }
                     (Some(l), None) => LiteralRef::new_language_tagged_literal_unchecked(
                         value,
@@ -482,7 +484,11 @@ mod tests {
         let mut s = TermStore::new();
         let int = s.literal("1", "http://www.w3.org/2001/XMLSchema#integer", None);
         let string = s.literal("1", "http://www.w3.org/2001/XMLSchema#string", None);
-        let en = s.literal("1", "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString", Some("en"));
+        let en = s.literal(
+            "1",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+            Some("en"),
+        );
 
         assert_ne!(int, string);
         assert_ne!(en, string);

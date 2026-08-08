@@ -28,12 +28,7 @@ impl Path {
     ///
     /// `depth` bounds recursion so a shapes graph containing a cyclic blank node
     /// structure is rejected rather than overflowing the stack.
-    pub fn compile(
-        node: TermId,
-        shapes: &Graph,
-        store: &TermStore,
-        vocab: &Vocab,
-    ) -> Result<Self> {
+    pub fn compile(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vocab) -> Result<Self> {
         Self::compile_at(node, shapes, store, vocab, 0)
     }
 
@@ -54,7 +49,9 @@ impl Path {
             return Ok(Path::Predicate(node));
         }
         if store.is_literal(node) {
-            return Err(Error::Shape("a literal is not a valid property path".into()));
+            return Err(Error::Shape(
+                "a literal is not a valid property path".into(),
+            ));
         }
 
         let sub = |n: TermId| Self::compile_at(n, shapes, store, vocab, depth + 1);
@@ -79,9 +76,9 @@ impl Path {
             return Ok(Path::Inverse(Box::new(sub(inner)?)));
         }
         if let Some(head) = shapes.object(node, vocab.sh_alternativePath) {
-            let items = shapes
-                .list(head, vocab)
-                .ok_or_else(|| Error::Shape("sh:alternativePath is not a well-formed list".into()))?;
+            let items = shapes.list(head, vocab).ok_or_else(|| {
+                Error::Shape("sh:alternativePath is not a well-formed list".into())
+            })?;
             if items.len() < 2 {
                 return Err(Error::Shape(
                     "sh:alternativePath needs at least two alternatives".into(),
@@ -275,7 +272,6 @@ impl Path {
             std::mem::swap(&mut frontier, &mut next);
         }
     }
-
 }
 
 /// `(origin index, node reached)`. The origin is an index into the focus slice
@@ -324,7 +320,7 @@ fn probe(input: &Pairs, p: TermId, data: &Graph, reverse: bool, out: &mut Pairs)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{loader, GraphBuilder};
+    use crate::model::{GraphBuilder, loader};
     use oxrdfio::RdfFormat;
 
     struct Fixture {
@@ -338,8 +334,15 @@ mod tests {
             let mut store = TermStore::new();
             let vocab = Vocab::new(&mut store);
             let mut b = GraphBuilder::new();
-            loader::parse_str(turtle, RdfFormat::Turtle, "http://t/", 0, &mut store, &mut b)
-                .unwrap();
+            loader::parse_str(
+                turtle,
+                RdfFormat::Turtle,
+                "http://t/",
+                0,
+                &mut store,
+                &mut b,
+            )
+            .unwrap();
             Self {
                 store,
                 vocab,
@@ -402,7 +405,10 @@ mod tests {
         ));
         let p = f.path().unwrap();
         assert!(p.as_predicate().is_some());
-        assert_eq!(f.eval(&p, "http://ex/a"), vec!["http://ex/b", "http://ex/c"]);
+        assert_eq!(
+            f.eval(&p, "http://ex/a"),
+            vec!["http://ex/b", "http://ex/c"]
+        );
         assert!(f.eval(&p, "http://ex/none").is_empty());
     }
 
@@ -412,8 +418,14 @@ mod tests {
             "{PREFIX} ex:S sh:path [ sh:inversePath ex:p ] . ex:a ex:p ex:b . ex:c ex:p ex:b ."
         ));
         let p = f.path().unwrap();
-        assert_eq!(p, Path::Inverse(Box::new(Path::Predicate(f.iri("http://ex/p")))));
-        assert_eq!(f.eval(&p, "http://ex/b"), vec!["http://ex/a", "http://ex/c"]);
+        assert_eq!(
+            p,
+            Path::Inverse(Box::new(Path::Predicate(f.iri("http://ex/p"))))
+        );
+        assert_eq!(
+            f.eval(&p, "http://ex/b"),
+            vec!["http://ex/a", "http://ex/c"]
+        );
     }
 
     #[test]
@@ -431,7 +443,10 @@ mod tests {
             "{PREFIX} ex:S sh:path [ sh:alternativePath ( ex:p ex:q ) ] . ex:a ex:p ex:b ; ex:q ex:c ."
         ));
         let p = f.path().unwrap();
-        assert_eq!(f.eval(&p, "http://ex/a"), vec!["http://ex/b", "http://ex/c"]);
+        assert_eq!(
+            f.eval(&p, "http://ex/a"),
+            vec!["http://ex/b", "http://ex/c"]
+        );
     }
 
     #[test]
@@ -452,7 +467,10 @@ mod tests {
             "{PREFIX} ex:S sh:path [ sh:oneOrMorePath ex:p ] . ex:a ex:p ex:b . ex:b ex:p ex:c ."
         ));
         let p = f.path().unwrap();
-        assert_eq!(f.eval(&p, "http://ex/a"), vec!["http://ex/b", "http://ex/c"]);
+        assert_eq!(
+            f.eval(&p, "http://ex/a"),
+            vec!["http://ex/b", "http://ex/c"]
+        );
     }
 
     #[test]
@@ -461,7 +479,10 @@ mod tests {
             "{PREFIX} ex:S sh:path [ sh:zeroOrOnePath ex:p ] . ex:a ex:p ex:b . ex:b ex:p ex:c ."
         ));
         let p = f.path().unwrap();
-        assert_eq!(f.eval(&p, "http://ex/a"), vec!["http://ex/a", "http://ex/b"]);
+        assert_eq!(
+            f.eval(&p, "http://ex/a"),
+            vec!["http://ex/a", "http://ex/b"]
+        );
     }
 
     #[test]
@@ -498,7 +519,10 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("http://ex/a".into(), vec!["http://ex/x".into(), "http://ex/y".into()]),
+                (
+                    "http://ex/a".into(),
+                    vec!["http://ex/x".into(), "http://ex/y".into()]
+                ),
                 ("http://ex/b".into(), vec!["http://ex/y".into()]),
                 ("http://ex/c".into(), vec![]),
             ]
@@ -555,6 +579,9 @@ mod tests {
         assert!(matches!(f.path(), Err(Error::Shape(_))), "one alternative");
 
         let mut f = Fixture::new(&format!("{PREFIX} ex:S sh:path [ ex:bogus true ] ."));
-        assert!(matches!(f.path(), Err(Error::Shape(_))), "not a path at all");
+        assert!(
+            matches!(f.path(), Err(Error::Shape(_))),
+            "not a path at all"
+        );
     }
 }

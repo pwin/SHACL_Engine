@@ -94,9 +94,8 @@ impl ValidationReport {
         let mut next_bnode = 0u64;
         let report = fresh_bnode(&mut next_bnode);
 
-        let iri = |t: TermId| -> NamedNode {
-            NamedNode::new_unchecked(store.iri(t).unwrap_or_default())
-        };
+        let iri =
+            |t: TermId| -> NamedNode { NamedNode::new_unchecked(store.iri(t).unwrap_or_default()) };
 
         g.insert(&Triple::new(
             report.clone(),
@@ -110,7 +109,15 @@ impl ValidationReport {
         ));
 
         for result in &self.results {
-            let node = self.write_result(result, &report, store, vocab, shapes, &mut g, &mut next_bnode);
+            let node = self.write_result(
+                result,
+                &report,
+                store,
+                vocab,
+                shapes,
+                &mut g,
+                &mut next_bnode,
+            );
             let _ = node;
         }
         g
@@ -127,9 +134,8 @@ impl ValidationReport {
         g: &mut OxGraph,
         next: &mut u64,
     ) -> NamedOrBlankNode {
-        let iri = |t: TermId| -> NamedNode {
-            NamedNode::new_unchecked(store.iri(t).unwrap_or_default())
-        };
+        let iri =
+            |t: TermId| -> NamedNode { NamedNode::new_unchecked(store.iri(t).unwrap_or_default()) };
         let node = fresh_bnode(next);
 
         g.insert(&Triple::new(
@@ -159,7 +165,11 @@ impl ValidationReport {
         ));
 
         if let Some(v) = result.value {
-            g.insert(&Triple::new(node.clone(), iri(vocab.sh_value), store.to_oxrdf(v)));
+            g.insert(&Triple::new(
+                node.clone(),
+                iri(vocab.sh_value),
+                store.to_oxrdf(v),
+            ));
         }
         if let Some(s) = result.source_shape {
             g.insert(&Triple::new(
@@ -239,7 +249,7 @@ impl ValidationReport {
 fn parse_result(
     node: TermId,
     g: &Graph,
-    store: &TermStore,
+    _store: &TermStore,
     vocab: &Vocab,
     depth: u32,
 ) -> ValidationResult {
@@ -260,7 +270,7 @@ fn parse_result(
         // report in a hand-written test cannot hang the harness.
         details: if depth < 32 {
             g.objects(node, vocab.sh_detail)
-                .map(|d| parse_result(d, g, store, vocab, depth + 1))
+                .map(|d| parse_result(d, g, _store, vocab, depth + 1))
                 .collect()
         } else {
             Vec::new()
@@ -307,7 +317,7 @@ fn copy_subtree(root: TermId, src: &Graph, store: &TermStore, dst: &mut OxGraph)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{loader, GraphBuilder};
+    use crate::model::{GraphBuilder, loader};
     use oxrdf::dataset::CanonicalizationAlgorithm;
     use oxrdfio::RdfFormat;
 
@@ -315,7 +325,15 @@ mod tests {
         let mut store = TermStore::new();
         let vocab = Vocab::new(&mut store);
         let mut b = GraphBuilder::new();
-        loader::parse_str(turtle, RdfFormat::Turtle, "http://t/", 1, &mut store, &mut b).unwrap();
+        loader::parse_str(
+            turtle,
+            RdfFormat::Turtle,
+            "http://t/",
+            1,
+            &mut store,
+            &mut b,
+        )
+        .unwrap();
         (store, vocab, b.build())
     }
 
@@ -348,7 +366,8 @@ mod tests {
     #[test]
     fn empty_report_serialises_as_conforming() {
         let (store, vocab, shapes) = fixture("");
-        let g = ValidationReport::default().to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]);
+        let g =
+            ValidationReport::default().to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]);
         let text = canonical(g);
         assert!(text.contains("#ValidationReport"));
         assert!(text.contains(r#""true"^^<http://www.w3.org/2001/XMLSchema#boolean>"#));
@@ -364,14 +383,16 @@ mod tests {
         let path = store.named_node("http://ex/age");
 
         let report = ValidationReport {
-            results: vec![ValidationResult::new(
-                focus,
-                vocab.sh_DatatypeConstraintComponent,
-                vocab.sh_Violation,
-            )
-            .with_value(value)
-            .with_path(Some(path))
-            .with_source_shape(shape)],
+            results: vec![
+                ValidationResult::new(
+                    focus,
+                    vocab.sh_DatatypeConstraintComponent,
+                    vocab.sh_Violation,
+                )
+                .with_value(value)
+                .with_path(Some(path))
+                .with_source_shape(shape),
+            ],
         };
         let text = canonical(report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]));
 
@@ -395,16 +416,21 @@ mod tests {
         let focus = store.named_node("http://ex/a");
 
         let report = ValidationReport {
-            results: vec![ValidationResult::new(
-                focus,
-                vocab.sh_MinCountConstraintComponent,
-                vocab.sh_Violation,
-            )
-            .with_path(Some(path))],
+            results: vec![
+                ValidationResult::new(
+                    focus,
+                    vocab.sh_MinCountConstraintComponent,
+                    vocab.sh_Violation,
+                )
+                .with_path(Some(path)),
+            ],
         };
         let text = canonical(report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]));
 
-        assert!(text.contains("#inversePath"), "path structure was not copied");
+        assert!(
+            text.contains("#inversePath"),
+            "path structure was not copied"
+        );
         assert!(text.contains("<http://ex/parent>"));
     }
 
@@ -412,12 +438,18 @@ mod tests {
     fn nested_details_are_serialised() {
         let (mut store, vocab, shapes) = fixture("");
         let focus = store.named_node("http://ex/a");
-        let inner = ValidationResult::new(focus, vocab.sh_DatatypeConstraintComponent, vocab.sh_Violation);
+        let inner = ValidationResult::new(
+            focus,
+            vocab.sh_DatatypeConstraintComponent,
+            vocab.sh_Violation,
+        );
         let mut outer =
             ValidationResult::new(focus, vocab.sh_NodeConstraintComponent, vocab.sh_Violation);
         outer.details.push(inner);
 
-        let report = ValidationReport { results: vec![outer] };
+        let report = ValidationReport {
+            results: vec![outer],
+        };
         let text = canonical(report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]));
         assert!(text.contains("#NodeConstraintComponent"));
         assert!(text.contains("#DatatypeConstraintComponent"));

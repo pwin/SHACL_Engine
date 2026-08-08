@@ -329,7 +329,10 @@ mod tests {
         let mut s = TermStore::new();
         let v = Vocab::new(&mut s);
 
-        assert_eq!(s.iri(v.sh_NodeShape), Some("http://www.w3.org/ns/shacl#NodeShape"));
+        assert_eq!(
+            s.iri(v.sh_NodeShape),
+            Some("http://www.w3.org/ns/shacl#NodeShape")
+        );
         assert_eq!(
             s.iri(v.rdf_type),
             Some("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")

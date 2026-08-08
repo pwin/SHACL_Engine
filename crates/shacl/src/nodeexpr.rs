@@ -459,14 +459,14 @@ fn eval_at(
     // A blank node heading an RDF list is a sequence of expressions, evaluated
     // and concatenated. `()` is `rdf:nil`, an IRI, so it is a constant and
     // never reaches here.
-    if g.object(node, ctx.vocab.rdf_first).is_some() {
-        if let Some(items) = g.list(node, ctx.vocab) {
-            let mut out = Vec::new();
-            for item in items {
-                out.extend(sub!(item, focus));
-            }
-            return Ok(out);
+    if g.object(node, ctx.vocab.rdf_first).is_some()
+        && let Some(items) = g.list(node, ctx.vocab)
+    {
+        let mut out = Vec::new();
+        for item in items {
+            out.extend(sub!(item, focus));
         }
+        return Ok(out);
     }
 
     // A blank node with no triples at all denotes the empty sequence.
@@ -544,7 +544,7 @@ fn eval_sparql_call(
             return Err(Error::Shape(format!(
                 "sparql:{func} was given {} arguments",
                 rendered.len()
-            )))
+            )));
         }
         None => format!("{}({})", sparql_function_name(func), rendered.join(", ")),
     };
@@ -702,7 +702,7 @@ fn canonicalise(t: TermId, store: &mut TermStore, vocab: &Vocab) -> TermId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{loader, GraphBuilder};
+    use crate::model::{GraphBuilder, loader};
     use oxrdfio::RdfFormat;
 
     const PREFIX: &str = "@prefix shnex: <http://www.w3.org/ns/shacl-node-expr#> .
@@ -776,7 +776,10 @@ mod tests {
             "ex:E ex:expr [ shnex:pathValues rdfs:label ] .
              ex:TestNode rdfs:label \"test node\" .",
         );
-        assert_eq!(f.eval(Some("http://ex/TestNode")).unwrap(), vec!["test node"]);
+        assert_eq!(
+            f.eval(Some("http://ex/TestNode")).unwrap(),
+            vec!["test node"]
+        );
         assert!(f.eval(Some("http://ex/Absent")).unwrap().is_empty());
     }
 
@@ -892,4 +895,3 @@ mod tests {
         assert!(matches!(f.eval(None), Err(Error::Shape(_))));
     }
 }
-

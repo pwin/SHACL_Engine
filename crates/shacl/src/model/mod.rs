@@ -28,12 +28,7 @@ impl Graph {
     ///
     /// Returns `false` if the list is malformed — not `rdf:nil`-terminated, or
     /// cyclic — which several shape constraints must detect rather than hang on.
-    pub fn collect_list(
-        &self,
-        head: TermId,
-        vocab: &Vocab,
-        out: &mut Vec<TermId>,
-    ) -> bool {
+    pub fn collect_list(&self, head: TermId, vocab: &Vocab, out: &mut Vec<TermId>) -> bool {
         out.clear();
         let mut node = head;
         // The list cannot be longer than the graph; this bounds cyclic input.
@@ -70,13 +65,22 @@ mod tests {
         let mut store = TermStore::new();
         let vocab = Vocab::new(&mut store);
         let mut b = GraphBuilder::new();
-        loader::parse_str(turtle, RdfFormat::Turtle, "http://t/", 0, &mut store, &mut b).unwrap();
+        loader::parse_str(
+            turtle,
+            RdfFormat::Turtle,
+            "http://t/",
+            0,
+            &mut store,
+            &mut b,
+        )
+        .unwrap();
         (store, vocab, b.build())
     }
 
     #[test]
     fn reads_a_well_formed_list() {
-        let (mut store, vocab, g) = graph_of("@prefix ex: <http://ex/> . ex:s ex:p (ex:a ex:b ex:c) .");
+        let (mut store, vocab, g) =
+            graph_of("@prefix ex: <http://ex/> . ex:s ex:p (ex:a ex:b ex:c) .");
         let s = store.named_node("http://ex/s");
         let p = store.named_node("http://ex/p");
         let head = g.object(s, p).unwrap();

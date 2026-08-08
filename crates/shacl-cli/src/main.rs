@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
-use shacl::model::{loader, scope, TermStore, Vocab};
+use shacl::model::{TermStore, Vocab, loader, scope};
 
 #[derive(Parser)]
 #[command(name = "shacl", version, about = "A high-performance SHACL validator")]
@@ -82,7 +82,8 @@ fn run() -> Result<bool> {
     let compile_time = t1.elapsed();
 
     let t2 = Instant::now();
-    let mut report = shacl::validate::validate_in(&data, &compiled, shapes_ref, &mut store, &vocab)?;
+    let mut report =
+        shacl::validate::validate_in(&data, &compiled, shapes_ref, &mut store, &vocab)?;
     let mut best = t2.elapsed();
     for _ in 1..args.repeat {
         let t = Instant::now();

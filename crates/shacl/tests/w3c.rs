@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use shacl::model::{loader, Graph, TermId, TermStore, Vocab};
+use shacl::model::{Graph, TermId, TermStore, Vocab, loader};
 use shacl::path::Path as ShaclPath;
 use shacl::report::{ValidationReport, ValidationResult};
 
@@ -50,7 +50,9 @@ fn collect_manifests(root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn iri_to_path(iri: &str) -> Option<PathBuf> {
-    let rest = iri.strip_prefix("file:///").or_else(|| iri.strip_prefix("file://"))?;
+    let rest = iri
+        .strip_prefix("file:///")
+        .or_else(|| iri.strip_prefix("file://"))?;
     let decoded = percent_decode(rest);
     Some(PathBuf::from(decoded))
 }
@@ -60,12 +62,13 @@ fn percent_decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v as char);
-                i += 3;
-                continue;
-            }
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        {
+            out.push(v as char);
+            i += 3;
+            continue;
         }
         out.push(b[i] as char);
         i += 1;
@@ -229,7 +232,10 @@ fn run_node_expr(
 
 /// A stable, readable id like `core/node/datatype-001`.
 fn short_name(iri: &str, manifest: &Path) -> String {
-    let dir = manifest.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    let dir = manifest
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let dir = dir.replace('\\', "/");
     iri.rsplit_once('/')
         .map(|(_, last)| {
@@ -293,7 +299,7 @@ fn run_one(
                 return Status::Mismatch(format!(
                     "expected a failure, but validation produced {} result(s)",
                     r.results.len()
-                ))
+                ));
             }
             Ok(r) => r,
             // A failure was the expected outcome.
@@ -342,7 +348,7 @@ fn run_one(
             return Status::Mismatch(format!(
                 "expected a failure, but validation produced {} result(s)",
                 r.results.len()
-            ))
+            ));
         }
         Ok(r) => r,
         Err(_) if expects_failure => return Status::Pass,
@@ -479,8 +485,14 @@ fn w3c_test_suites() {
     let mut total_pass = 0usize;
     println!();
     for (suite, outcomes) in &per_suite {
-        let pass = outcomes.iter().filter(|o| matches!(o.status, Status::Pass)).count();
-        let errors = outcomes.iter().filter(|o| matches!(o.status, Status::Error(_))).count();
+        let pass = outcomes
+            .iter()
+            .filter(|o| matches!(o.status, Status::Pass))
+            .count();
+        let errors = outcomes
+            .iter()
+            .filter(|o| matches!(o.status, Status::Error(_)))
+            .count();
         total += outcomes.len();
         total_pass += pass;
         println!(
@@ -523,7 +535,10 @@ fn progress() {
             run_manifest(m, &mut outcomes);
         }
     }
-    let pass = outcomes.iter().filter(|o| matches!(o.status, Status::Pass)).count();
+    let pass = outcomes
+        .iter()
+        .filter(|o| matches!(o.status, Status::Pass))
+        .count();
     assert!(
         pass >= BASELINE_PASSING,
         "regression: {pass} passing, baseline is {BASELINE_PASSING}"

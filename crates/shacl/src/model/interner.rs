@@ -5,7 +5,7 @@
 //! instead of a `String`, which is what lets the rest of the engine compare
 //! terms with an integer compare and keep triples in flat arrays.
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::{BuildHasher, Hash};
 
 use foldhash::fast::RandomState;
 
@@ -100,9 +100,7 @@ impl Interner {
 
 #[inline]
 fn hash_str(hasher: &RandomState, s: &str) -> u64 {
-    let mut h = hasher.build_hasher();
-    s.hash(&mut h);
-    h.finish()
+    hasher.hash_one(s)
 }
 
 #[cfg(test)]

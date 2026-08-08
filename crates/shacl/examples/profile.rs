@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use shacl::model::{loader, scope, Graph, TermId, TermStore, Vocab};
+use shacl::model::{Graph, TermId, TermStore, Vocab, loader, scope};
 use shacl::path::Path;
 use shacl::shapes::{Constraint, Shapes, Target};
 
@@ -58,7 +58,9 @@ fn main() {
     // --- phase 2: path evaluation, the suspected hot spot
     let mut total_path = std::time::Duration::ZERO;
     for c in &shape.constraints {
-        let Constraint::Property(id) = c else { continue };
+        let Constraint::Property(id) = c else {
+            continue;
+        };
         let inner = compiled.get(*id);
         let Some(p) = &inner.path else { continue };
 
@@ -79,7 +81,9 @@ fn main() {
     // --- phase 2b: the per-value work each constraint does, replicated here
     // so its cost is visible without instrumenting the engine's hot loop.
     for c in &shape.constraints {
-        let Constraint::Property(id) = c else { continue };
+        let Constraint::Property(id) = c else {
+            continue;
+        };
         let inner = compiled.get(*id);
         let Some(p) = &inner.path else { continue };
         let sets = p.eval_sets(&focus, &data);
@@ -99,7 +103,10 @@ fn main() {
                     // What the engine does: a graph probe per value node.
                     for row in sets.rows() {
                         for &v in row.values {
-                            if data.objects(v, vocab.rdf_type).any(|ty| classes.contains(&ty)) {
+                            if data
+                                .objects(v, vocab.rdf_type)
+                                .any(|ty| classes.contains(&ty))
+                            {
                                 hits += 1;
                             }
                         }
@@ -145,7 +152,11 @@ fn main() {
     let t = Instant::now();
     let report = shacl::validate::validate_with(&data, &compiled, &mut store, &vocab).unwrap();
     let full = t.elapsed();
-    println!("validate     {:>9.4}s  ({} results)", full.as_secs_f64(), report.results.len());
+    println!(
+        "validate     {:>9.4}s  ({} results)",
+        full.as_secs_f64(),
+        report.results.len()
+    );
 
     // --- phase 4: raw index probe rate, isolating cache behaviour from
     // everything else. One binary search per focus node, nothing more.

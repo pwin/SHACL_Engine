@@ -392,7 +392,10 @@ impl<'a> Compiler<'a> {
         for &ty in &[v.sh_NodeShape, v.sh_PropertyShape] {
             candidates.extend(self.graph.subjects(v.rdf_type, ty));
         }
-        for p in target_predicates(v).into_iter().chain(constraint_predicates(v)) {
+        for p in target_predicates(v)
+            .into_iter()
+            .chain(constraint_predicates(v))
+        {
             candidates.extend(self.graph.subjects_of(p));
         }
         candidates.sort_unstable();
@@ -479,7 +482,10 @@ impl<'a> Compiler<'a> {
                 .map(Target::Node),
         );
         targets.extend(g.objects(node, v.sh_targetClass).map(Target::Class));
-        targets.extend(g.objects(node, v.sh_targetSubjectsOf).map(Target::SubjectsOf));
+        targets.extend(
+            g.objects(node, v.sh_targetSubjectsOf)
+                .map(Target::SubjectsOf),
+        );
         targets.extend(g.objects(node, v.sh_targetObjectsOf).map(Target::ObjectsOf));
         targets.extend(g.objects(node, v.sh_targetWhere).map(Target::Where));
 
@@ -528,9 +534,8 @@ impl<'a> Compiler<'a> {
                 .alternatives(t)
                 .into_iter()
                 .map(|k| {
-                    NodeKind::from_term(k, v).ok_or_else(|| {
-                        Error::Shape("sh:nodeKind is not a known node kind".into())
-                    })
+                    NodeKind::from_term(k, v)
+                        .ok_or_else(|| Error::Shape("sh:nodeKind is not a known node kind".into()))
                 })
                 .collect::<Result<Vec<_>>>()?;
             out.push(Constraint::NodeKind(kinds));
@@ -585,8 +590,7 @@ impl<'a> Compiler<'a> {
                 .ok_or_else(|| Error::Shape("sh:languageIn is not a well-formed list".into()))?;
             out.push(Constraint::LanguageIn(langs));
         }
-        if g
-            .object(node, v.sh_uniqueLang)
+        if g.object(node, v.sh_uniqueLang)
             .and_then(|t| self.store.lexical_form(t))
             .map(|s| s == "true")
             .unwrap_or(false)
@@ -843,7 +847,7 @@ impl<'a> Compiler<'a> {
                 None => {
                     return Err(Error::Shape(
                         "sh:sparql needs either sh:select or sh:ask".into(),
-                    ))
+                    ));
                 }
             },
         };
@@ -856,9 +860,7 @@ impl<'a> Compiler<'a> {
         // property shape it stands for the path's SPARQL syntax, which for
         // anything but a bare predicate cannot be a term.
         let text = match path {
-            Some(p) if text.contains("$PATH") => {
-                text.replace("$PATH", &p.to_sparql(self.store))
-            }
+            Some(p) if text.contains("$PATH") => text.replace("$PATH", &p.to_sparql(self.store)),
             _ => text.to_string(),
         };
 
@@ -939,10 +941,11 @@ impl<'a> Compiler<'a> {
     fn alternatives(&self, t: TermId) -> Vec<TermId> {
         // Only a blank node heading an `rdf:first` can be a list; an IRI is
         // always the value itself, even if it happens to have list properties.
-        if self.store.is_blank(t) && self.graph.object(t, self.vocab.rdf_first).is_some() {
-            if let Some(items) = self.graph.list(t, self.vocab) {
-                return items;
-            }
+        if self.store.is_blank(t)
+            && self.graph.object(t, self.vocab.rdf_first).is_some()
+            && let Some(items) = self.graph.list(t, self.vocab)
+        {
+            return items;
         }
         vec![t]
     }
@@ -980,7 +983,9 @@ fn build_regex(pattern: &str, flags: &str) -> Result<Regex> {
             // `q` (literal) has no inline equivalent; handled below.
             'q' => {}
             other => {
-                return Err(Error::Shape(format!("unsupported sh:flags value '{other}'")))
+                return Err(Error::Shape(format!(
+                    "unsupported sh:flags value '{other}'"
+                )));
             }
         }
     }
@@ -1000,7 +1005,7 @@ fn build_regex(pattern: &str, flags: &str) -> Result<Regex> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{loader, GraphBuilder};
+    use crate::model::{GraphBuilder, loader};
     use oxrdfio::RdfFormat;
 
     const PREFIX: &str = "@prefix sh: <http://www.w3.org/ns/shacl#> .
@@ -1043,14 +1048,25 @@ mod tests {
         assert_eq!(shape.targets.len(), 4);
         assert!(shape.targets.iter().any(|t| matches!(t, Target::Class(_))));
         assert!(shape.targets.iter().any(|t| matches!(t, Target::Node(_))));
-        assert!(shape.targets.iter().any(|t| matches!(t, Target::SubjectsOf(_))));
-        assert!(shape.targets.iter().any(|t| matches!(t, Target::ObjectsOf(_))));
+        assert!(
+            shape
+                .targets
+                .iter()
+                .any(|t| matches!(t, Target::SubjectsOf(_)))
+        );
+        assert!(
+            shape
+                .targets
+                .iter()
+                .any(|t| matches!(t, Target::ObjectsOf(_)))
+        );
         assert_eq!(s.roots().len(), 1);
     }
 
     #[test]
     fn a_shape_that_is_a_class_targets_its_instances() {
-        let (mut store, _, s) = compile("ex:S a sh:NodeShape, rdfs:Class ; sh:datatype xsd:string .");
+        let (mut store, _, s) =
+            compile("ex:S a sh:NodeShape, rdfs:Class ; sh:datatype xsd:string .");
         let shape = shape_of(&s, &mut store, "http://ex/S");
         assert!(matches!(shape.targets[..], [Target::ImplicitClass(_)]));
     }
@@ -1115,7 +1131,12 @@ mod tests {
             })
             .expect("sh:or");
         assert_eq!(or.len(), 2);
-        assert!(shape.constraints.iter().any(|c| matches!(c, Constraint::Not(_))));
+        assert!(
+            shape
+                .constraints
+                .iter()
+                .any(|c| matches!(c, Constraint::Not(_)))
+        );
     }
 
     #[test]
@@ -1142,18 +1163,25 @@ mod tests {
         let shape = shape_of(&s, &mut store, "http://ex/S");
         let has = |f: fn(&Constraint) -> bool| shape.constraints.iter().any(f);
         assert!(has(|c| matches!(c, Constraint::In(v) if v.len() == 2)));
-        assert!(has(|c| matches!(c, Constraint::LanguageIn(v) if v.len() == 2)));
-        assert!(has(|c| matches!(c, Constraint::Closed { ignored, .. } if ignored.len() == 1)));
+        assert!(has(
+            |c| matches!(c, Constraint::LanguageIn(v) if v.len() == 2)
+        ));
+        assert!(has(
+            |c| matches!(c, Constraint::Closed { ignored, .. } if ignored.len() == 1)
+        ));
     }
 
     #[test]
     fn closed_false_produces_no_constraint() {
-        let (mut store, _, s) = compile("ex:S a sh:NodeShape ; sh:closed false ; sh:datatype xsd:string .");
+        let (mut store, _, s) =
+            compile("ex:S a sh:NodeShape ; sh:closed false ; sh:datatype xsd:string .");
         let shape = shape_of(&s, &mut store, "http://ex/S");
-        assert!(!shape
-            .constraints
-            .iter()
-            .any(|c| matches!(c, Constraint::Closed { .. })));
+        assert!(
+            !shape
+                .constraints
+                .iter()
+                .any(|c| matches!(c, Constraint::Closed { .. }))
+        );
     }
 
     #[test]

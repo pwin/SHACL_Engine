@@ -1,0 +1,108 @@
+name: release
+
+# Tag a commit `v0.1.0` to cut a release. Artefacts are built natively on each
+# platform rather than cross-compiled, so every binary and wheel is tested on
+# the system it targets before it ships.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo fmt --all --check
+
+  cli:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release -p shacl-cli --target ${{ matrix.target }}
+      - name: Stage
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/shacl${{ matrix.ext }}" \
+             "dist/shacl-${{ matrix.target }}${{ matrix.ext }}"
+      # A binary that cannot report its own version did not link correctly.
+      - name: Smoke test
+        shell: bash
+        run: ./dist/shacl-${{ matrix.target }}${{ matrix.ext }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/*
+
+  wheels:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-13, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # One abi3 wheel per platform serves every CPython from 3.9 up, so the
+      # matrix is over operating systems rather than interpreter versions.
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --manifest-path crates/shacl-python/Cargo.toml
+          manylinux: auto
+      - name: Smoke test
+        shell: bash
+        run: |
+          python -m pip install --find-links dist --force-reinstall shacl
+          python -m pip install pytest
+          python -m pytest crates/shacl-python/tests -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl
+
+  publish:
+    needs: [cli, wheels]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+      - name: Collect and checksum
+        run: |
+          mkdir -p dist
+          find staged -type f \( -name 'shacl-*' -o -name '*.whl' \) -exec cp {} dist/ \;
+          (cd dist && sha256sum ./* > SHA256SUMS)
+          ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

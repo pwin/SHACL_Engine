@@ -79,12 +79,8 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
                     Vec::new()
                 }
             }
-            (Some(&s), Some(&p), None) => {
-                self.graph.objects(s, p).map(|o| [s, p, o]).collect()
-            }
-            (None, Some(&p), Some(&o)) => {
-                self.graph.subjects(p, o).map(|s| [s, p, o]).collect()
-            }
+            (Some(&s), Some(&p), None) => self.graph.objects(s, p).map(|o| [s, p, o]).collect(),
+            (None, Some(&p), Some(&o)) => self.graph.subjects(p, o).map(|s| [s, p, o]).collect(),
             (Some(&s), None, None) => self
                 .graph
                 .predicate_objects(s)
@@ -95,11 +91,7 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
                 .subject_predicates(o)
                 .map(|(s, p)| [s, p, o])
                 .collect(),
-            (None, Some(&p), None) => self
-                .graph
-                .iter()
-                .filter(|r| r[1] == p)
-                .collect(),
+            (None, Some(&p), None) => self.graph.iter().filter(|r| r[1] == p).collect(),
             (Some(&s), None, Some(&o)) => self
                 .graph
                 .predicate_objects(s)
@@ -200,10 +192,7 @@ fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
     Ok(())
 }
 
-fn unsupported_in(
-    p: &spargebra::algebra::GraphPattern,
-    prebound: &[&str],
-) -> Option<&'static str> {
+fn unsupported_in(p: &spargebra::algebra::GraphPattern, prebound: &[&str]) -> Option<&'static str> {
     use spargebra::algebra::GraphPattern as G;
     let recurse = |x: &G| unsupported_in(x, prebound);
     match p {
@@ -218,9 +207,9 @@ fn unsupported_in(
             }
             recurse(inner)
         }
-        G::Join { left, right }
-        | G::Union { left, right }
-        | G::LeftJoin { left, right, .. } => recurse(left).or_else(|| recurse(right)),
+        G::Join { left, right } | G::Union { left, right } | G::LeftJoin { left, right, .. } => {
+            recurse(left).or_else(|| recurse(right))
+        }
         G::Filter { inner, .. }
         | G::Graph { inner, .. }
         | G::OrderBy { inner, .. }
@@ -541,14 +530,22 @@ pub fn from_term(term: TermRef<'_>, store: &TermStore) -> Option<TermId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{loader, GraphBuilder, Vocab};
+    use crate::model::{GraphBuilder, Vocab, loader};
     use oxrdfio::RdfFormat;
 
     fn fixture(turtle: &str) -> (TermStore, Vocab, Graph) {
         let mut store = TermStore::new();
         let vocab = Vocab::new(&mut store);
         let mut b = GraphBuilder::new();
-        loader::parse_str(turtle, RdfFormat::Turtle, "http://t/", 0, &mut store, &mut b).unwrap();
+        loader::parse_str(
+            turtle,
+            RdfFormat::Turtle,
+            "http://t/",
+            0,
+            &mut store,
+            &mut b,
+        )
+        .unwrap();
         (store, vocab, b.build())
     }
 
@@ -615,7 +612,12 @@ mod tests {
 
         let yes = parse_query("", "ASK { $this <http://ex/p> ?o }").unwrap();
         assert!(is_ask(&yes));
-        assert_eq!(run(&yes, &[("this", this.clone())], &g, &store).unwrap().len(), 1);
+        assert_eq!(
+            run(&yes, &[("this", this.clone())], &g, &store)
+                .unwrap()
+                .len(),
+            1
+        );
 
         let no = parse_query("", "ASK { $this <http://ex/nope> ?o }").unwrap();
         assert_eq!(run(&no, &[("this", this)], &g, &store).unwrap().len(), 0);

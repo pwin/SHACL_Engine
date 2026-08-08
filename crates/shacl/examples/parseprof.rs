@@ -14,7 +14,9 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use shacl::model::{GraphBuilder, TermStore, Vocab};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: parseprof <data.ttl>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: parseprof <data.ttl>");
     let text = std::fs::read_to_string(&path).expect("readable file");
     println!("input        {:.1} MB", text.len() as f64 / 1e6);
 
@@ -71,7 +73,11 @@ fn main() {
     let graph = b.build();
     let build = t.elapsed();
     println!("  push rows  {:>9.4}s", push.as_secs_f64());
-    println!("  build idx  {:>9.4}s  ({} triples)", build.as_secs_f64(), graph.len());
+    println!(
+        "  build idx  {:>9.4}s  ({} triples)",
+        build.as_secs_f64(),
+        graph.len()
+    );
 
     println!(
         "total        {:>9.4}s",

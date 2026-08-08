@@ -13,11 +13,11 @@
 //!         print(r.focus_node, r.component, r.value)
 //! ```
 
-use std::path::PathBuf;
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
+use std::path::PathBuf;
 
-use engine::model::{loader, scope, Graph, TermStore, Vocab};
+use engine::model::{Graph, TermStore, Vocab, loader, scope};
 
 /// Translates an engine error into the closest Python exception.
 fn to_py_err(e: engine::Error) -> PyErr {
@@ -109,8 +109,8 @@ impl Shapes {
         let mut store = TermStore::new();
         let vocab = Vocab::new(&mut store);
         let shapes_graph = load(&mut store).map_err(to_py_err)?;
-        let compiled = engine::shapes::Shapes::compile(&shapes_graph, &store, &vocab)
-            .map_err(to_py_err)?;
+        let compiled =
+            engine::shapes::Shapes::compile(&shapes_graph, &store, &vocab).map_err(to_py_err)?;
         Ok(Self {
             store,
             vocab,
@@ -194,14 +194,9 @@ impl Shapes {
 impl Shapes {
     fn run(&self, store: &mut TermStore, data: &Graph) -> PyResult<Report> {
         let vocab = &self.vocab;
-        let report = engine::validate::validate_in(
-            data,
-            &self.compiled,
-            &self.shapes_graph,
-            store,
-            vocab,
-        )
-        .map_err(to_py_err)?;
+        let report =
+            engine::validate::validate_in(data, &self.compiled, &self.shapes_graph, store, vocab)
+                .map_err(to_py_err)?;
 
         let local = |t: engine::TermId| -> String {
             store

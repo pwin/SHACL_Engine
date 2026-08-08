@@ -115,7 +115,11 @@ fn turtle_chunks(text: &str, want: usize) -> Option<Vec<(usize, usize)>> {
             b'"' | b'\'' => {
                 let quote = bytes[i];
                 let long = bytes[i..].starts_with(&[quote; 3]);
-                let delim: &[u8] = if long { &[quote, quote, quote] } else { &[quote] };
+                let delim: &[u8] = if long {
+                    &[quote, quote, quote]
+                } else {
+                    &[quote]
+                };
                 i += delim.len();
                 while i < bytes.len() {
                     if bytes[i] == b'\\' {
@@ -140,14 +144,16 @@ fn turtle_chunks(text: &str, want: usize) -> Option<Vec<(usize, usize)>> {
             b'.' if depth == 0 => {
                 // A statement terminator is followed by whitespace or EOF,
                 // which is what separates it from the `.` in a decimal.
-                let ends = bytes
-                    .get(i + 1)
-                    .is_none_or(|c| c.is_ascii_whitespace());
+                let ends = bytes.get(i + 1).is_none_or(|c| c.is_ascii_whitespace());
                 if ends {
                     let stmt = text[stmt_start..i].trim_start();
                     let directive = stmt.starts_with('@')
-                        || stmt.get(..6).is_some_and(|s| s.eq_ignore_ascii_case("prefix"))
-                        || stmt.get(..4).is_some_and(|s| s.eq_ignore_ascii_case("base"));
+                        || stmt
+                            .get(..6)
+                            .is_some_and(|s| s.eq_ignore_ascii_case("prefix"))
+                        || stmt
+                            .get(..4)
+                            .is_some_and(|s| s.eq_ignore_ascii_case("base"));
                     if directive {
                         // A directive after the prologue closed means one
                         // shared prologue is not enough.
@@ -260,8 +266,8 @@ pub fn parse_file(
     let format = format_from_path(path)
         .ok_or_else(|| Error::Parse(format!("unknown RDF syntax for {}", path.display())))?;
     let base = path_to_base_iri(path)?;
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
     if format == RdfFormat::Turtle {
         return parse_turtle_parallel(&text, &base, scope, store, builder);
     }
@@ -296,7 +302,9 @@ mod tests {
         .unwrap();
         let g = b.build();
 
-        let doc = store.get_named_node("http://base/doc.ttl").expect("<> resolved");
+        let doc = store
+            .get_named_node("http://base/doc.ttl")
+            .expect("<> resolved");
         let ty = store.get_named_node("http://ex/Doc").unwrap();
         assert!(g.contains(doc, v.rdf_type, ty));
         assert_eq!(g.len(), 2);
@@ -340,7 +348,15 @@ mod tests {
 
         let mut seq_store = TermStore::new();
         let mut seq = GraphBuilder::new();
-        parse_str(text, RdfFormat::Turtle, "http://b/", 0, &mut seq_store, &mut seq).unwrap();
+        parse_str(
+            text,
+            RdfFormat::Turtle,
+            "http://b/",
+            0,
+            &mut seq_store,
+            &mut seq,
+        )
+        .unwrap();
         let a = canonical(seq.build(), &seq_store);
 
         let mut par_store = TermStore::new();
@@ -398,7 +414,10 @@ mod tests {
             format_from_path(Path::new("a/b.ttl")),
             Some(RdfFormat::Turtle)
         );
-        assert_eq!(format_from_path(Path::new("a.rdf")), Some(RdfFormat::RdfXml));
+        assert_eq!(
+            format_from_path(Path::new("a.rdf")),
+            Some(RdfFormat::RdfXml)
+        );
         assert_eq!(format_from_path(Path::new("a.txt")), None);
         assert_eq!(format_from_path(Path::new("noext")), None);
     }

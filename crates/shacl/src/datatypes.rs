@@ -230,11 +230,20 @@ mod tests {
     #[test]
     fn compares_integers_exactly() {
         let mut f = F::new();
-        assert_eq!(f.cmp(("2", "integer"), ("10", "integer")), Some(Ordering::Less));
-        assert_eq!(f.cmp(("10", "integer"), ("10", "integer")), Some(Ordering::Equal));
+        assert_eq!(
+            f.cmp(("2", "integer"), ("10", "integer")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            f.cmp(("10", "integer"), ("10", "integer")),
+            Some(Ordering::Equal)
+        );
         // Beyond f64's exact range: must not collapse to equal.
         assert_eq!(
-            f.cmp(("9007199254740993", "integer"), ("9007199254740992", "integer")),
+            f.cmp(
+                ("9007199254740993", "integer"),
+                ("9007199254740992", "integer")
+            ),
             Some(Ordering::Greater)
         );
     }
@@ -242,16 +251,31 @@ mod tests {
     #[test]
     fn compares_across_the_numeric_tower() {
         let mut f = F::new();
-        assert_eq!(f.cmp(("2", "integer"), ("2.5", "decimal")), Some(Ordering::Less));
-        assert_eq!(f.cmp(("2.0", "decimal"), ("2", "integer")), Some(Ordering::Equal));
-        assert_eq!(f.cmp(("1", "integer"), ("1.5e0", "double")), Some(Ordering::Less));
+        assert_eq!(
+            f.cmp(("2", "integer"), ("2.5", "decimal")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            f.cmp(("2.0", "decimal"), ("2", "integer")),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            f.cmp(("1", "integer"), ("1.5e0", "double")),
+            Some(Ordering::Less)
+        );
     }
 
     #[test]
     fn compares_strings_booleans_and_dates() {
         let mut f = F::new();
-        assert_eq!(f.cmp(("a", "string"), ("b", "string")), Some(Ordering::Less));
-        assert_eq!(f.cmp(("false", "boolean"), ("true", "boolean")), Some(Ordering::Less));
+        assert_eq!(
+            f.cmp(("a", "string"), ("b", "string")),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            f.cmp(("false", "boolean"), ("true", "boolean")),
+            Some(Ordering::Less)
+        );
         assert_eq!(
             f.cmp(("2020-01-01", "date"), ("2021-01-01", "date")),
             Some(Ordering::Less)
@@ -307,7 +331,10 @@ mod tests {
         assert!(is_well_formed("INF", v.xsd_double, v));
         assert!(is_well_formed("NaN", v.xsd_double, v));
         assert!(is_well_formed("1.5e3", v.xsd_double, v));
-        assert!(!is_well_formed("Infinity", v.xsd_double, v), "not an XSD spelling");
+        assert!(
+            !is_well_formed("Infinity", v.xsd_double, v),
+            "not an XSD spelling"
+        );
     }
 
     #[test]
@@ -316,7 +343,10 @@ mod tests {
         assert!(language_matches("en-GB", "en"));
         assert!(language_matches("EN-gb", "en"));
         assert!(!language_matches("en", "en-GB"));
-        assert!(!language_matches("english", "en"), "must break on a subtag boundary");
+        assert!(
+            !language_matches("english", "en"),
+            "must break on a subtag boundary"
+        );
         assert!(language_matches("de", "*"));
         assert!(!language_matches("", "*"));
     }
