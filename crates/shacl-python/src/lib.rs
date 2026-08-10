@@ -41,9 +41,18 @@ pub struct Result {
     pub source_shape: Option<String>,
     /// Local name of the constraint component, e.g. `MinCountConstraintComponent`.
     pub component: String,
+    /// The same as a full IRI, which is the only way to tell two custom
+    /// constraint components apart when their local names collide.
+    pub component_iri: String,
     /// Local name of the severity: `Violation`, `Warning` or `Info`.
     pub severity: String,
+    /// The severity as a full IRI.
+    pub severity_iri: String,
+    /// The first `sh:message`, or `None`. Kept for convenience; `messages`
+    /// holds all of them, which matters when a shape carries one per language.
     pub message: Option<String>,
+    /// Every `sh:message` on the result, in the order the shape declared them.
+    pub messages: Vec<String>,
 }
 
 #[pymethods]
@@ -59,14 +68,17 @@ impl Result {
 }
 
 /// The outcome of a validation run.
-#[pyclass(frozen, get_all)]
+#[pyclass(frozen)]
 pub struct Report {
     /// True when nothing of blocking severity was reported.
+    #[pyo3(get)]
     pub conforms: bool,
+    #[pyo3(get)]
     pub results: Vec<Result>,
-    /// The report as RDF, in the form SHACL defines. Held as text because the
-    /// term store it was built from does not outlive the call.
-    pub turtle: String,
+    /// The report graph. Kept rather than a fixed serialisation so any format
+    /// can be produced on demand; it holds terms rather than handles into the
+    /// term store, so it outlives the call that built it.
+    pub graph: engine::report::OxGraph,
 }
 
 #[pymethods]
@@ -76,14 +88,33 @@ impl Report {
     /// This is the specification's own artefact — a `sh:ValidationReport` —
     /// and is what to hand to another RDF tool. The attributes above are a
     /// convenience for reading it from Python.
+    ///
+    /// Accepts `turtle`, `ntriples`, `rdfxml`, `jsonld` and `n3`, with the
+    /// usual aliases.
     #[pyo3(signature = (format = "turtle"))]
     fn serialize(&self, format: &str) -> PyResult<String> {
-        match format {
-            "turtle" | "ttl" => Ok(self.turtle.clone()),
-            other => Err(PyValueError::new_err(format!(
-                "unsupported format {other:?}; use \"turtle\""
-            ))),
-        }
+        let fmt = match format.to_ascii_lowercase().as_str() {
+            "turtle" | "ttl" => engine::report::RdfFormat::Turtle,
+            "ntriples" | "n-triples" | "nt" => engine::report::RdfFormat::NTriples,
+            "rdfxml" | "rdf/xml" | "xml" | "rdf" => engine::report::RdfFormat::RdfXml,
+            "jsonld" | "json-ld" | "json" => engine::report::RdfFormat::JsonLd {
+                profile: engine::report::JsonLdProfileSet::empty(),
+            },
+            "n3" => engine::report::RdfFormat::N3,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unsupported format {other:?}; use one of \
+                     turtle, ntriples, rdfxml, jsonld, n3"
+                )));
+            }
+        };
+        engine::report::serialize_graph(&self.graph, fmt).map_err(to_py_err)
+    }
+
+    /// The report as Turtle, equivalent to `serialize("turtle")`.
+    #[getter]
+    fn turtle(&self) -> PyResult<String> {
+        self.serialize("turtle")
     }
 
     fn __repr__(&self) -> String {
@@ -170,6 +201,44 @@ impl Shapes {
         })
     }
 
+    /// Compiles a shapes graph from text in any supported format.
+    ///
+    /// The general form of [`Shapes::from_turtle`], for callers holding a
+    /// document that is not Turtle — an `rdflib.Graph` serialised to whatever
+    /// is cheapest, say, rather than forced through Turtle first.
+    #[staticmethod]
+    #[pyo3(signature = (text, format = "turtle", base = "http://example.org/shapes"))]
+    fn from_text(py: Python<'_>, text: &str, format: &str, base: &str) -> PyResult<Self> {
+        let fmt = format_by_name(format)?;
+        py.detach(|| {
+            Self::build(|store| {
+                let mut b = engine::model::GraphBuilder::new();
+                loader::parse_str(text, fmt, base, scope::SHAPES, store, &mut b)?;
+                Ok(b.build())
+            })
+        })
+    }
+
+    /// Validates a data graph held in memory, in any supported format.
+    #[pyo3(signature = (text, format = "turtle", base = "http://example.org/data"))]
+    fn validate_text(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        format: &str,
+        base: &str,
+    ) -> PyResult<Report> {
+        let fmt = format_by_name(format)?;
+        py.detach(|| {
+            let mut store = self.store.clone();
+            let mut b = engine::model::GraphBuilder::new();
+            loader::parse_str(text, fmt, base, scope::DATA, &mut store, &mut b)
+                .map_err(to_py_err)?;
+            let data = b.build();
+            self.run(&mut store, &data)
+        })
+    }
+
     /// Validates a data graph read from a file.
     fn validate_file(&self, py: Python<'_>, path: PathBuf) -> PyResult<Report> {
         py.detach(|| {
@@ -223,45 +292,74 @@ impl Shapes {
                 .unwrap_or_else(|| store.to_oxrdf(t).to_string())
         };
         let term = |t: engine::TermId| store.to_oxrdf(t).to_string();
+        // The bare IRI, without the angle brackets `term` would add.
+        let full = |t: engine::TermId| {
+            store
+                .iri(t)
+                .map(str::to_string)
+                .unwrap_or_else(|| store.to_oxrdf(t).to_string())
+        };
 
         let results = report
             .results
             .iter()
-            .map(|r| Result {
-                focus_node: term(r.focus_node),
-                value: r.value.map(term),
-                path: r.path.map(term),
-                source_shape: r.source_shape.map(term),
-                component: local(r.source_constraint_component),
-                severity: local(r.severity),
-                message: r
+            .map(|r| {
+                let messages: Vec<String> = r
                     .messages
-                    .first()
-                    .and_then(|&m| store.lexical_form(m))
-                    .map(str::to_string),
+                    .iter()
+                    .filter_map(|&m| store.lexical_form(m))
+                    .map(str::to_string)
+                    .collect();
+                Result {
+                    focus_node: term(r.focus_node),
+                    value: r.value.map(term),
+                    path: r.path.map(term),
+                    source_shape: r.source_shape.map(term),
+                    component: local(r.source_constraint_component),
+                    component_iri: full(r.source_constraint_component),
+                    severity: local(r.severity),
+                    severity_iri: full(r.severity),
+                    message: messages.first().cloned(),
+                    messages,
+                }
             })
             .collect();
-
-        let turtle = report
-            .serialize(
-                engine::model::loader::RdfFormat::Turtle,
-                store,
-                vocab,
-                &self.shapes_graph,
-                &[vocab.sh_Violation],
-            )
-            .map_err(to_py_err)?;
 
         Ok(Report {
             conforms: report.conforms(&[vocab.sh_Violation]),
             results,
-            turtle,
+            graph: report.to_oxrdf(store, vocab, &self.shapes_graph, &[vocab.sh_Violation]),
         })
     }
 }
 
 fn oxrdf_format_turtle() -> engine::model::loader::RdfFormat {
     engine::model::loader::RdfFormat::Turtle
+}
+
+/// Resolves a format name to the parser for it.
+///
+/// The same names [`Report::serialize`] writes, so a document can be round
+/// tripped through this module without a lookup table on the Python side.
+fn format_by_name(name: &str) -> PyResult<engine::report::RdfFormat> {
+    use engine::report::RdfFormat;
+    Ok(match name.to_ascii_lowercase().as_str() {
+        "turtle" | "ttl" => RdfFormat::Turtle,
+        "ntriples" | "n-triples" | "nt" => RdfFormat::NTriples,
+        "nquads" | "n-quads" | "nq" => RdfFormat::NQuads,
+        "trig" => RdfFormat::TriG,
+        "rdfxml" | "rdf/xml" | "xml" | "rdf" => RdfFormat::RdfXml,
+        "jsonld" | "json-ld" | "json" => RdfFormat::JsonLd {
+            profile: engine::report::JsonLdProfileSet::empty(),
+        },
+        "n3" => RdfFormat::N3,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unsupported format {other:?}; use one of \
+                 turtle, ntriples, nquads, trig, rdfxml, jsonld, n3"
+            )));
+        }
+    })
 }
 
 /// Validates `data_path` against `shapes_path` in one call.

@@ -19,6 +19,12 @@ pub fn format_from_path(path: &Path) -> Option<RdfFormat> {
         "nq" => RdfFormat::NQuads,
         "trig" => RdfFormat::TriG,
         "rdf" | "xml" | "owl" => RdfFormat::RdfXml,
+        // JSON-LD was already an output format; not reading it back was an
+        // asymmetry rather than a decision.
+        "jsonld" | "json" => RdfFormat::JsonLd {
+            profile: oxrdfio::JsonLdProfileSet::empty(),
+        },
+        "n3" => RdfFormat::N3,
         _ => return None,
     })
 }
@@ -531,5 +537,24 @@ mod tests {
             &mut b,
         );
         assert!(matches!(err, Err(Error::Parse(_))));
+    }
+
+    /// Every format the writer can emit must also be readable, so a report
+    /// this engine produced can be fed back to it.
+    #[test]
+    fn recognises_every_format_it_can_write() {
+        let f = |name: &str| format_from_path(std::path::Path::new(name));
+        assert!(matches!(f("g.ttl"), Some(RdfFormat::Turtle)));
+        assert!(matches!(f("g.nt"), Some(RdfFormat::NTriples)));
+        assert!(matches!(f("g.rdf"), Some(RdfFormat::RdfXml)));
+        assert!(matches!(f("g.jsonld"), Some(RdfFormat::JsonLd { .. })));
+        assert!(matches!(f("g.json"), Some(RdfFormat::JsonLd { .. })));
+        assert!(matches!(f("g.n3"), Some(RdfFormat::N3)));
+
+        // Case is not significant, and an unknown extension stays unknown
+        // rather than being guessed at.
+        assert!(matches!(f("G.TTL"), Some(RdfFormat::Turtle)));
+        assert!(f("g.txt").is_none());
+        assert!(f("g").is_none());
     }
 }

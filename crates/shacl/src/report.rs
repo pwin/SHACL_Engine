@@ -1,6 +1,12 @@
 //! Validation reports: the SHACL result model and its RDF serialisation.
 
-use oxrdf::{Graph as OxGraph, Literal, NamedNode, NamedOrBlankNode, Term, Triple};
+use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple};
+
+/// The report graph type, re-exported so a caller can hold one without
+/// depending on a separately-versioned `oxrdf` of its own.
+pub use oxrdf::Graph as OxGraph;
+/// Likewise the formats [`serialize_graph`] accepts.
+pub use oxrdfio::{JsonLdProfileSet, RdfFormat};
 
 use crate::model::{Graph, TermId, TermStore, Vocab};
 
@@ -234,33 +240,42 @@ impl ValidationReport {
         shapes: &Graph,
         disallowed: &[TermId],
     ) -> crate::Result<String> {
-        let graph = self.to_oxrdf(store, vocab, shapes, disallowed);
-        let mut serializer = oxrdfio::RdfSerializer::from_format(format);
-        // Prefixes are cosmetic in N-Triples but make Turtle readable, which
-        // is the whole reason someone would pick it.
-        for (prefix, iri) in [
-            ("sh", crate::model::vocab::SH),
-            ("rdf", crate::model::vocab::RDF),
-            ("rdfs", crate::model::vocab::RDFS),
-            ("xsd", crate::model::vocab::XSD),
-        ] {
-            serializer = serializer
-                .with_prefix(prefix, iri)
-                .map_err(|e| crate::Error::Io(format!("bad prefix {prefix}: {e}")))?;
-        }
-
-        let mut out = Vec::new();
-        let mut writer = serializer.for_writer(&mut out);
-        for triple in graph.iter() {
-            writer
-                .serialize_triple(triple)
-                .map_err(|e| crate::Error::Io(e.to_string()))?;
-        }
-        writer
-            .finish()
-            .map_err(|e| crate::Error::Io(e.to_string()))?;
-        String::from_utf8(out).map_err(|e| crate::Error::Io(e.to_string()))
+        serialize_graph(&self.to_oxrdf(store, vocab, shapes, disallowed), format)
     }
+}
+
+/// Writes an already-built report graph in `format`.
+///
+/// Split from [`ValidationReport::serialize`] because the graph is
+/// self-contained — it holds terms, not handles into a `TermStore` — so a
+/// caller that has to outlive the store can keep the graph and choose a format
+/// later. The Python bindings do exactly that.
+pub fn serialize_graph(graph: &OxGraph, format: oxrdfio::RdfFormat) -> crate::Result<String> {
+    let mut serializer = oxrdfio::RdfSerializer::from_format(format);
+    // Prefixes are cosmetic in N-Triples but make Turtle readable, which
+    // is the whole reason someone would pick it.
+    for (prefix, iri) in [
+        ("sh", crate::model::vocab::SH),
+        ("rdf", crate::model::vocab::RDF),
+        ("rdfs", crate::model::vocab::RDFS),
+        ("xsd", crate::model::vocab::XSD),
+    ] {
+        serializer = serializer
+            .with_prefix(prefix, iri)
+            .map_err(|e| crate::Error::Io(format!("bad prefix {prefix}: {e}")))?;
+    }
+
+    let mut out = Vec::new();
+    let mut writer = serializer.for_writer(&mut out);
+    for triple in graph.iter() {
+        writer
+            .serialize_triple(triple)
+            .map_err(|e| crate::Error::Io(e.to_string()))?;
+    }
+    writer
+        .finish()
+        .map_err(|e| crate::Error::Io(e.to_string()))?;
+    String::from_utf8(out).map_err(|e| crate::Error::Io(e.to_string()))
 }
 
 /// A validation report read back out of RDF, plus the severities its author
