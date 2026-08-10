@@ -97,6 +97,16 @@ pub struct TermStore {
     triple_terms: Vec<[TermId; 3]>,
     /// Scratch buffer for scoping blank node labels without allocating.
     scratch: String,
+    /// Sequential number given to each blank node label, per scope, in the
+    /// order the labels were first seen.
+    ///
+    /// The parser names an anonymous `[ … ]` node with a *random* identifier,
+    /// which would otherwise reach the validation report and make two runs
+    /// over identical input print byte-different documents — no use to anyone
+    /// diffing one report against another. Renumbering on arrival makes the
+    /// label a function of the document instead, and drops 32 hex characters
+    /// of parser detail out of the report at the same time.
+    blank_numbers: hashbrown::HashMap<Box<str>, u32>,
 }
 
 impl Default for TermStore {
@@ -115,6 +125,7 @@ impl TermStore {
             blank_of: Vec::new(),
             triple_terms: Vec::new(),
             scratch: String::new(),
+            blank_numbers: hashbrown::HashMap::default(),
         }
     }
 
@@ -176,8 +187,23 @@ impl TermStore {
     /// would collapse into one node.
     pub fn blank_node(&mut self, scope: u32, label: &str) -> TermId {
         use std::fmt::Write;
+
+        // Renumber in first-seen order. Parsing a document is sequential, so
+        // the same document always yields the same numbers; the parser's own
+        // random naming for anonymous nodes never escapes this point.
         self.scratch.clear();
         let _ = write!(self.scratch, "{scope}:{label}");
+        let n = match self.blank_numbers.get(self.scratch.as_str()) {
+            Some(&n) => n,
+            None => {
+                let n = self.blank_numbers.len() as u32;
+                self.blank_numbers.insert(self.scratch.as_str().into(), n);
+                n
+            }
+        };
+
+        self.scratch.clear();
+        let _ = write!(self.scratch, "{scope}:b{n}");
         // Interning borrows `strings` mutably, so hand it the scratch contents
         // via a reborrow rather than holding `self` across the call.
         let s = {
@@ -525,7 +551,21 @@ mod tests {
 
         assert_eq!(s.to_oxrdf(iri).to_string(), "<http://ex/a>");
         assert_eq!(s.to_oxrdf(lit).to_string(), "\"hi\"");
-        assert_eq!(s.to_oxrdf(bn).to_string(), "_:3_x1");
+
+        // The document's own label is *not* carried through: blank nodes are
+        // renumbered in first-seen order. RDF treats a label as local syntax
+        // rather than identity — a processor may relabel — and renumbering is
+        // what makes a report reproducible, since the parser names anonymous
+        // `[ … ]` nodes randomly and those labels would otherwise reach the
+        // output. The cost is that `_:x1` in the source cannot be matched by
+        // eye to a node in the report.
+        assert_eq!(s.to_oxrdf(bn).to_string(), "_:3_b0");
+        // Same label, same node; a different one gets the next number.
+        assert_eq!(s.blank_node(3, "x1"), bn);
+        let other = s.blank_node(3, "x2");
+        assert_eq!(s.to_oxrdf(other).to_string(), "_:3_b1");
+        // Numbering is per store, but the scope still separates documents.
+        assert_ne!(s.blank_node(4, "x1"), bn);
     }
 
     #[test]

@@ -69,6 +69,44 @@ _:r1 a sh:ValidationResult ;
 The default, `human`, is a one-line-per-result summary for reading rather than
 parsing. Reach for it at a terminal and for anything else use the RDF.
 
+The RDF output is **reproducible**: the same inputs give the same bytes, so two
+reports can be diffed and only real differences show up. That needs the triples
+written in a fixed order and blank nodes numbered in first-seen order rather
+than carrying the parser's random names for anonymous `[ … ]` nodes — which
+means a `_:label` written in the source does not survive into the report. RDF
+treats blank node labels as local syntax rather than identity, so a processor
+is free to relabel; this one does.
+
+## Inputs
+
+`--data` and `--shapes` each take a path, an `http(s)` URL, or `-` for standard
+input, and each can be repeated to merge several documents into one graph.
+
+```sh
+shacl -d data.ttl -s https://example.org/shapes.ttl
+shacl -d instances.ttl schema.ttl -s shapes.ttl        # merged
+cat data.ttl | shacl -d - --data-format ttl -s shapes.ttl
+```
+
+Syntax is taken from the file extension, or over HTTP from the `Content-Type`,
+and `--data-format`/`--shapes-format` (`--df`/`--sf`) override both — required
+for `-`, which has neither.
+
+Only the URLs given on the command line are ever fetched. Nothing in a fetched
+document triggers a further request: `owl:imports` is not followed, so a
+shapes graph cannot reach anywhere you did not name.
+
+### Coming from pySHACL
+
+Most of its flags work here: `-df`/`-sf`, `-o`, `-m`/`--metashacl`, `-i`,
+`-w`/`--allow-warnings`, `--allow-info`, `--abort`. Two differences worth
+knowing:
+
+- `-f` has no `table`; `human` is the readable format.
+- Warnings and infos never break conformance by default, so `-w` is accepted
+  but already the default. `--min-severity warning` is the knob in the other
+  direction, for making them count.
+
 ## Conformance
 
 The suites are run by a manifest-driven harness covering both kinds of entry:

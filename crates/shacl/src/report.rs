@@ -265,9 +265,21 @@ pub fn serialize_graph(graph: &OxGraph, format: oxrdfio::RdfFormat) -> crate::Re
             .map_err(|e| crate::Error::Io(format!("bad prefix {prefix}: {e}")))?;
     }
 
+    // `OxGraph` is hash-backed, so `iter()` hands the triples back in an order
+    // that changes from one process to the next. Two identical validation runs
+    // would then print byte-different reports, which defeats diffing one
+    // against another — the main reason to want the report as a graph at all.
+    //
+    // Sorted by N-Triples text rather than by term, because `Triple` has no
+    // `Ord`; the key is cached so it is built once per triple rather than once
+    // per comparison. Report size is bounded by the result count, so this is
+    // paid on something small.
+    let mut triples: Vec<_> = graph.iter().collect();
+    triples.sort_by_cached_key(|t| t.to_string());
+
     let mut out = Vec::new();
     let mut writer = serializer.for_writer(&mut out);
-    for triple in graph.iter() {
+    for triple in triples {
         writer
             .serialize_triple(triple)
             .map_err(|e| crate::Error::Io(e.to_string()))?;

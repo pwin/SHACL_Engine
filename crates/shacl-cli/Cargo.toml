@@ -15,3 +15,8 @@ shacl = { path = "../shacl" }
 clap.workspace = true
 anyhow.workspace = true
 mimalloc = { version = "0.1", default-features = false }
+# `rustls` rather than the platform TLS: the release builds run on three
+# operating systems, and linking OpenSSL would make each of them a separate
+# problem. `default-features = false` drops the JSON and gzip support that a
+# validator has no use for.
+ureq = { version = "3", default-features = false, features = ["rustls"] }

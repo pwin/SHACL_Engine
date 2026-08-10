@@ -1,5 +1,6 @@
 //! Reading RDF documents into an indexed [`Graph`].
 
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 pub use oxrdfio::RdfFormat;
@@ -119,6 +120,44 @@ pub fn parse_str(
         .with_default_graph(oxrdf::GraphName::DefaultGraph);
 
     for quad in parser.for_slice(text.as_bytes()) {
+        let quad = quad.map_err(|e| Error::Parse(format!("{base}: {e}")))?;
+        let s = store.intern_oxrdf(quad.subject.as_ref().into(), scope);
+        let p = store.named_node(quad.predicate.as_str());
+        let o = store.intern_oxrdf(quad.object.as_ref(), scope);
+        builder.push(s, p, o);
+    }
+    Ok(())
+}
+
+/// Parses `reader` into `builder`, without requiring the document to sit in
+/// memory as one buffer first.
+///
+/// `oxrdfio` reads just enough of `reader` to recognise the next token and
+/// compacts what it has already consumed, so a document far larger than
+/// memory can still be validated — the only limit is a single pathologically
+/// long token, which the parser refuses past a fixed buffer size rather than
+/// growing without bound.
+///
+/// This is what a genuinely unbounded source needs: standard input, or a file
+/// too large to read into one `String`. A file whose format is Turtle still
+/// prefers [`parse_turtle_parallel`] when the whole document is available up
+/// front — splitting it across threads needs random access to find safe cut
+/// points, which a stream cannot offer — so that path deliberately keeps
+/// reading the document whole rather than switching to this one.
+pub fn parse_reader(
+    reader: impl Read,
+    format: RdfFormat,
+    base: &str,
+    scope: u32,
+    store: &mut TermStore,
+    builder: &mut GraphBuilder,
+) -> Result<()> {
+    let parser = RdfParser::from_format(format)
+        .with_base_iri(base)
+        .map_err(|e| Error::Parse(format!("invalid base IRI {base}: {e}")))?
+        .with_default_graph(oxrdf::GraphName::DefaultGraph);
+
+    for quad in parser.for_reader(reader) {
         let quad = quad.map_err(|e| Error::Parse(format!("{base}: {e}")))?;
         let s = store.intern_oxrdf(quad.subject.as_ref().into(), scope);
         let p = store.named_node(quad.predicate.as_str());
@@ -312,8 +351,12 @@ pub fn parse_turtle_parallel(
 
 /// Reads an RDF file into `builder`.
 ///
-/// Turtle takes the parallel path, which decides for itself whether the
-/// document can be split and falls back to one pass when it cannot.
+/// Turtle takes the parallel path, which needs the whole document up front to
+/// find safe chunk boundaries and so still reads it into one buffer. Every
+/// other format was already a single sequential pass with nothing to
+/// parallelise, so it streams instead: memory is bounded to one read buffer
+/// rather than the whole document, and parsing starts before the read
+/// finishes.
 pub fn parse_file(
     path: &Path,
     scope: u32,
@@ -323,18 +366,40 @@ pub fn parse_file(
     let format = format_from_path(path)
         .ok_or_else(|| Error::Parse(format!("unknown RDF syntax for {}", path.display())))?;
     let base = path_to_base_iri(path)?;
-    let text =
-        std::fs::read_to_string(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+
     if format == RdfFormat::Turtle {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
         return parse_turtle_parallel(&text, &base, scope, store, builder);
     }
-    parse_str(&text, format, &base, scope, store, builder)
+
+    let file =
+        std::fs::File::open(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+    parse_reader(BufReader::new(file), format, &base, scope, store, builder)
 }
 
 /// Reads a single file into a standalone graph.
 pub fn load_file(path: &Path, scope: u32, store: &mut TermStore) -> Result<Graph> {
     let mut builder = GraphBuilder::new();
     parse_file(path, scope, store, &mut builder)?;
+    Ok(builder.build())
+}
+
+/// Reads a streaming source into a standalone graph.
+///
+/// The [`RdfFormat`] must be given explicitly — there is no file extension to
+/// guess it from, which is the whole difference between this and
+/// [`load_file`]. Use it for standard input, or any document too large to
+/// read into memory as one buffer.
+pub fn load_reader(
+    reader: impl Read,
+    format: RdfFormat,
+    base: &str,
+    scope: u32,
+    store: &mut TermStore,
+) -> Result<Graph> {
+    let mut builder = GraphBuilder::new();
+    parse_reader(reader, format, base, scope, store, &mut builder)?;
     Ok(builder.build())
 }
 
@@ -537,6 +602,105 @@ mod tests {
             &mut b,
         );
         assert!(matches!(err, Err(Error::Parse(_))));
+    }
+
+    #[test]
+    fn parses_from_a_reader_the_same_as_from_a_slice() {
+        let mut store = TermStore::new();
+        let v = Vocab::new(&mut store);
+        let mut b = GraphBuilder::new();
+        let text = "@prefix ex: <http://ex/> . <> a ex:Doc . ex:s ex:p 1 .";
+        parse_reader(
+            text.as_bytes(),
+            RdfFormat::Turtle,
+            "http://base/doc.ttl",
+            0,
+            &mut store,
+            &mut b,
+        )
+        .unwrap();
+        let g = b.build();
+
+        let doc = store
+            .get_named_node("http://base/doc.ttl")
+            .expect("<> resolved");
+        let ty = store.get_named_node("http://ex/Doc").unwrap();
+        assert!(g.contains(doc, v.rdf_type, ty));
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn a_reader_that_yields_one_byte_at_a_time_still_parses() {
+        // Proves the buffering is genuinely incremental, not an accident of
+        // `&[u8]`'s `Read` impl handing the whole slice back in one call.
+        struct OneByteAtATime<'a>(&'a [u8]);
+        impl Read for OneByteAtATime<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() || buf.is_empty() {
+                    return Ok(0);
+                }
+                buf[0] = self.0[0];
+                self.0 = &self.0[1..];
+                Ok(1)
+            }
+        }
+
+        let text = "@prefix ex: <http://ex/> . ex:s ex:p \"v\" , \"w\" .";
+        let mut store = TermStore::new();
+        let mut b = GraphBuilder::new();
+        parse_reader(
+            OneByteAtATime(text.as_bytes()),
+            RdfFormat::Turtle,
+            "http://b/",
+            0,
+            &mut store,
+            &mut b,
+        )
+        .unwrap();
+        assert_eq!(b.build().len(), 2);
+    }
+
+    #[test]
+    fn reader_syntax_errors_are_reported_rather_than_panicking() {
+        let mut store = TermStore::new();
+        let mut b = GraphBuilder::new();
+        let err = parse_reader(
+            "this is not turtle @@@".as_bytes(),
+            RdfFormat::Turtle,
+            "http://base/",
+            0,
+            &mut store,
+            &mut b,
+        );
+        assert!(matches!(err, Err(Error::Parse(_))));
+    }
+
+    #[test]
+    fn load_file_streams_non_turtle_formats() {
+        let dir = std::env::temp_dir().join("shacl loader stream test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.nt");
+        std::fs::write(&file, "<http://ex/s> <http://ex/p> <http://ex/o> .\n").unwrap();
+
+        let mut store = TermStore::new();
+        let graph = load_file(&file, 0, &mut store).expect("streams a non-Turtle file");
+        assert_eq!(graph.len(), 1);
+
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn load_reader_returns_a_standalone_graph() {
+        let mut store = TermStore::new();
+        let graph = load_reader(
+            "<http://ex/s> <http://ex/p> <http://ex/o> .".as_bytes(),
+            RdfFormat::NTriples,
+            "http://base/",
+            0,
+            &mut store,
+        )
+        .unwrap();
+        assert_eq!(graph.len(), 1);
     }
 
     /// Every format the writer can emit must also be readable, so a report

@@ -52,16 +52,32 @@ pub fn validate_in(
     store: &mut TermStore,
     vocab: &Vocab,
 ) -> Result<ValidationReport> {
+    validate_in_with(data, shapes, shapes_graph, store, vocab, Options::default())
+}
+
+/// As [`validate_in`], under [`Options`].
+pub fn validate_in_with(
+    data: &Graph,
+    shapes: &Shapes,
+    shapes_graph: &Graph,
+    store: &mut TermStore,
+    vocab: &Vocab,
+    options: Options,
+) -> Result<ValidationReport> {
     let engine = Engine {
         data,
         shapes,
         shapes_graph,
         vocab,
         shnex: crate::nodeexpr::Shnex::new(store),
+        max_results: options.max_results,
     };
     let mut results = Vec::new();
     let mut stack = Stack::default();
     for &root in shapes.roots() {
+        if engine.enough(&results) {
+            break;
+        }
         let focus = engine.focus_nodes(shapes.get(root), &mut stack, store)?;
         engine.validate_shape(root, &focus, &mut results, &mut stack, store)?;
     }
@@ -75,9 +91,19 @@ pub fn validate_in(
         .zip(data.objects_of(vocab.sh_shape))
         .collect();
     for (node, shape_node) in by_node {
+        if engine.enough(&results) {
+            break;
+        }
         if let Some(id) = shapes.id_of(shape_node) {
             engine.validate_shape(id, &[node], &mut results, &mut stack, store)?;
         }
+    }
+
+    // A cap stops the work; it does not promise to land exactly on the number,
+    // since the constraint in flight when the limit is reached finishes its
+    // own row. Trimming here makes the report say what was asked for.
+    if let Some(n) = options.max_results {
+        results.truncate(n);
     }
     Ok(ValidationReport { results })
 }
@@ -105,6 +131,8 @@ pub fn node_conforms(
         shapes_graph: data,
         vocab,
         shnex: crate::nodeexpr::Shnex::new(store),
+        // A yes/no question, so one result is all it ever needs.
+        max_results: Some(1),
     };
     engine.conforms(id, node, &mut Stack::default(), store)
 }
@@ -116,6 +144,29 @@ struct Engine<'a> {
     shapes_graph: &'a Graph,
     vocab: &'a Vocab,
     shnex: crate::nodeexpr::Shnex,
+    /// Stop once this many results are in hand. `None` reports everything.
+    max_results: Option<usize>,
+}
+
+/// How much of the graph to validate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Abandon validation once this many results exist.
+    ///
+    /// This is a real early exit, not a truncation of a finished report: the
+    /// work stops, which is the only reason to ask for it. The consequence is
+    /// that the report is no longer a complete account of the graph, so the
+    /// count is the caller's choice rather than a default.
+    pub max_results: Option<usize>,
+}
+
+impl Options {
+    /// Stop at the first result, as `--abort-on-first` does.
+    pub fn first_only() -> Self {
+        Self {
+            max_results: Some(1),
+        }
+    }
 }
 
 /// The shape/node pairs currently being validated, used to break recursion.
@@ -151,6 +202,16 @@ struct Stack {
 const MAX_DEPTH: usize = 48;
 
 impl Engine<'_> {
+    /// Whether enough results are in hand to stop.
+    ///
+    /// Checked between constraints and between shapes rather than after every
+    /// individual result: those are the points where stopping is cheap and
+    /// leaves the report coherent, and a per-result check would cost more on
+    /// the overwhelmingly common uncapped path than it could ever save.
+    fn enough(&self, results: &[ValidationResult]) -> bool {
+        self.max_results.is_some_and(|n| results.len() >= n)
+    }
+
     // ------------------------------------------------------------- targeting
 
     fn focus_nodes(
@@ -280,6 +341,15 @@ impl Engine<'_> {
         stack.depth += 1;
         let mut outcome = Ok(());
         for constraint in &shape.constraints {
+            // `out` is whichever buffer this shape is filling, which for a
+            // nested shape is a scratch one rather than the report. Stopping
+            // early is still sound there, and is in fact the point: `conforms`
+            // and the nested-detail constraints only ever ask whether their
+            // buffer stayed empty, so once anything is in it the answer cannot
+            // change however many more results would have followed.
+            if self.enough(out) {
+                break;
+            }
             outcome = self.eval(shape, constraint, &sets, out, stack, store);
             if outcome.is_err() {
                 break;

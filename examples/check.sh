@@ -67,6 +67,35 @@ out=$("$SHACL" -d /tmp/shacl-report.$$.ttl --quiet); rc=$?
 rm -f /tmp/shacl-report.$$.ttl
 check "report parses as RDF"          "conforms: true"  "$out"
 
+# --- the flags added in the CLI round-out
+out=$("$SHACL" -d person-invalid.ttl -s person-shapes.ttl --abort | grep -c "ConstraintComponent")
+check "--abort stops at one result"   "1"  "$out"
+out=$("$SHACL" -d person-invalid.ttl -s person-shapes.ttl --max-results 3 | grep -c "ConstraintComponent")
+check "--max-results caps the report" "3"  "$out"
+
+# -o writes the same bytes the terminal would have seen.
+"$SHACL" -d person-invalid.ttl -s person-shapes.ttl -f turtle -o /tmp/shacl-o.$$.ttl
+piped=$("$SHACL" -d person-invalid.ttl -s person-shapes.ttl -f turtle)
+[ "$piped" = "$(cat /tmp/shacl-o.$$.ttl)" ] && r=same || r=different
+rm -f /tmp/shacl-o.$$.ttl
+check "-o matches stdout"             "same"            "$r"
+
+# Two documents that only validate once merged.
+out=$("$SHACL" -d person-valid.ttl person-shapes.ttl --quiet)
+check "repeated -d merges documents"  "conforms: true"  "$out"
+
+# Reading the data graph from a pipe.
+out=$(cat person-valid.ttl | "$SHACL" -d - --data-format ttl -s person-shapes.ttl --quiet)
+check "reads the data graph from -"   "conforms: true"  "$out"
+
+# The shapes here are well formed, so SHACL-SHACL should not object.
+out=$("$SHACL" -d person-valid.ttl -s person-shapes.ttl -m --quiet)
+check "--meta-shacl accepts them"     "conforms: true"  "$out"
+
+# pySHACL spellings people will already have in their fingers.
+out=$("$SHACL" -d person-valid.ttl --df ttl -s person-shapes.ttl --sf ttl -w --quiet)
+check "pySHACL flag aliases"          "conforms: true"  "$out"
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "all checks passed"
