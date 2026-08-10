@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 
 use crate::datatypes;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{Graph, TermId, TermKind, TermStore, Vocab};
 use crate::path::Path;
 use crate::report::{ValidationReport, ValidationResult};
@@ -60,7 +60,7 @@ pub fn validate_in(
         shnex: crate::nodeexpr::Shnex::new(store),
     };
     let mut results = Vec::new();
-    let mut stack = Vec::new();
+    let mut stack = Stack::default();
     for &root in shapes.roots() {
         let focus = engine.focus_nodes(shapes.get(root), &mut stack, store)?;
         engine.validate_shape(root, &focus, &mut results, &mut stack, store)?;
@@ -106,7 +106,7 @@ pub fn node_conforms(
         vocab,
         shnex: crate::nodeexpr::Shnex::new(store),
     };
-    engine.conforms(id, node, &mut Vec::new(), store)
+    engine.conforms(id, node, &mut Stack::default(), store)
 }
 
 struct Engine<'a> {
@@ -118,8 +118,37 @@ struct Engine<'a> {
     shnex: crate::nodeexpr::Shnex,
 }
 
-/// Shape/node pairs currently being validated, used to break recursion.
-type Stack = Vec<(ShapeId, TermId)>;
+/// The shape/node pairs currently being validated, used to break recursion.
+#[derive(Default)]
+struct Stack {
+    pairs: Vec<(ShapeId, TermId)>,
+    /// Nesting level, which `pairs.len()` does not give: one level pushes a
+    /// pair per focus node rather than a single pair.
+    depth: usize,
+}
+
+/// How deeply shapes may nest before validation is abandoned.
+///
+/// The visited set breaks *cycles*, but on its own it does not bound the
+/// descent: the number of distinct (shape, node) pairs is the product of the
+/// two, so a recursive shape over a long enough data chain still runs the
+/// process out of stack. A stack overflow is not a panic and cannot be caught,
+/// so it would take the host process with it — the Python bindings included,
+/// whose whole error story is that a Rust failure becomes a Python exception.
+///
+/// The limit is deliberately well below where the stack actually runs out,
+/// because how much stack a level costs is not fixed: a debug build overflows
+/// somewhere between 96 and 128 levels of the *cheapest* possible shape, and a
+/// level carrying a SPARQL constraint or a node expression costs considerably
+/// more than one carrying `sh:datatype`. Since the guarantee being made here is
+/// that the process never dies, the margin belongs on the safe side of that.
+///
+/// 48 is far more nesting than a hand-written shapes graph uses. What it does
+/// not cover is a *recursive* shape walked over a long data chain — a linked
+/// list of 100 items, say — which stops with an error rather than a report.
+/// Lifting that needs the descent moved off the call stack, not a bigger
+/// number here.
+const MAX_DEPTH: usize = 48;
 
 impl Engine<'_> {
     // ------------------------------------------------------------- targeting
@@ -208,14 +237,57 @@ impl Engine<'_> {
         if shape.deactivated || focus.is_empty() {
             return Ok(());
         }
+
+        // A shapes graph may be recursive: `sh:property`, `sh:memberShape` and
+        // `sh:reifierShape` can all reach a shape that reaches them back. Drop
+        // the focus nodes already being validated against this shape, which
+        // breaks the cycle and counts the repeat visit as conforming — the
+        // reading the spec leaves open, and the one `conforms` depends on.
+        //
+        // Only the same (shape, node) pair is dropped, so a shape cycle walked
+        // over a chain of distinct data nodes still runs to the end of the
+        // chain; it is not truncated at the first repeated shape.
+        //
+        // Nothing can repeat while the stack is empty, so the top-level focus
+        // set — much the largest — skips the filtering and its allocation.
+        let filtered: Vec<TermId>;
+        let focus = if stack.pairs.is_empty() {
+            focus
+        } else {
+            filtered = focus
+                .iter()
+                .copied()
+                .filter(|&n| !stack.pairs.contains(&(id, n)))
+                .collect();
+            if filtered.is_empty() {
+                return Ok(());
+            }
+            &filtered
+        };
+        if stack.depth >= MAX_DEPTH {
+            return Err(Error::Recursion(format!(
+                "shapes nested more than {MAX_DEPTH} deep"
+            )));
+        }
+
         let sets = match &shape.path {
             Some(p) => p.eval_sets(focus, self.data),
             None => ValueSets::identity(focus),
         };
+
+        let mark = stack.pairs.len();
+        stack.pairs.extend(focus.iter().map(|&n| (id, n)));
+        stack.depth += 1;
+        let mut outcome = Ok(());
         for constraint in &shape.constraints {
-            self.eval(shape, constraint, &sets, out, stack, store)?;
+            outcome = self.eval(shape, constraint, &sets, out, stack, store);
+            if outcome.is_err() {
+                break;
+            }
         }
-        Ok(())
+        stack.depth -= 1;
+        stack.pairs.truncate(mark);
+        outcome
     }
 
     /// Whether `node` conforms to the shape, producing no results.
@@ -226,17 +298,11 @@ impl Engine<'_> {
         stack: &mut Stack,
         store: &mut TermStore,
     ) -> Result<bool> {
-        // A shapes graph may be recursive. The spec leaves recursion
-        // undefined, so treat a repeat visit as conforming rather than
-        // diverging.
-        if stack.contains(&(id, node)) {
-            return Ok(true);
-        }
-        stack.push((id, node));
+        // The recursion guard lives in `validate_shape`, which this routes
+        // through, so a repeat visit yields no results — which is to say it
+        // conforms, the reading this has always taken.
         let mut scratch = Vec::new();
-        let outcome = self.validate_shape(id, &[node], &mut scratch, stack, store);
-        stack.pop();
-        outcome?;
+        self.validate_shape(id, &[node], &mut scratch, stack, store)?;
         Ok(scratch.is_empty())
     }
 

@@ -1,0 +1,74 @@
+name: ci
+
+# The gate for ordinary work. `release.yml` runs the same checks before it
+# ships anything, but it only fires on a tag — which meant nothing tested a
+# commit until someone was already cutting a release.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Superseded runs on the same branch are worth nothing; stop paying for them.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # `shacl-python` is excluded because it contains no Rust tests, and
+      # building it here would link against libpython for no benefit — the
+      # `wheels` job in `release.yml` builds it properly with
+      # `extension-module` and runs its pytest suite. Clippy and rustfmt still
+      # cover it, since neither links.
+      - run: cargo test --workspace --exclude shacl-python
+
+      # Three platforms, because the two worst bugs this project has shipped
+      # were both platform-specific: a path-to-IRI conversion that only failed
+      # on Windows, and a test-discovery bug that made the suite silently find
+      # zero tests on Linux.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo fmt --all --check
+
+  # A release build behaves differently from a debug one — different overflow
+  # behaviour, and much smaller stack frames, which is what the recursion depth
+  # limit is calibrated against. The examples double as a CLI smoke test.
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p shacl-cli
+      - run: ./examples/check.sh
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+      - run: pip install maturin pytest
+      - run: maturin build --release -m crates/shacl-python/Cargo.toml --out dist
+      - run: pip install --no-index --find-links dist shacl
+      - run: pytest crates/shacl-python/tests -q

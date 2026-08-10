@@ -109,25 +109,31 @@ impl ValidationReport {
         ));
 
         for result in &self.results {
-            let node = self.write_result(
+            self.write_result(
                 result,
                 &report,
+                vocab.sh_result,
                 store,
                 vocab,
                 shapes,
                 &mut g,
                 &mut next_bnode,
             );
-            let _ = node;
         }
         g
     }
 
+    /// `link` is the predicate joining `parent` to this result: `sh:result`
+    /// from the report itself, `sh:detail` from an enclosing result. They are
+    /// not interchangeable — a result is not a report, so hanging a nested one
+    /// off `sh:result` puts it outside the vocabulary's intended usage, and
+    /// this crate's own reader looks for `sh:detail` and would drop it.
     #[allow(clippy::too_many_arguments)]
     fn write_result(
         &self,
         result: &ValidationResult,
         parent: &NamedOrBlankNode,
+        link: TermId,
         store: &TermStore,
         vocab: &Vocab,
         shapes: &Graph,
@@ -138,11 +144,7 @@ impl ValidationReport {
             |t: TermId| -> NamedNode { NamedNode::new_unchecked(store.iri(t).unwrap_or_default()) };
         let node = fresh_bnode(next);
 
-        g.insert(&Triple::new(
-            parent.clone(),
-            iri(vocab.sh_result),
-            node.clone(),
-        ));
+        g.insert(&Triple::new(parent.clone(), iri(link), node.clone()));
         g.insert(&Triple::new(
             node.clone(),
             iri(vocab.rdf_type),
@@ -201,7 +203,16 @@ impl ValidationReport {
             ));
         }
         for detail in &result.details {
-            self.write_result(detail, &node, store, vocab, shapes, g, next);
+            self.write_result(
+                detail,
+                &node,
+                vocab.sh_detail,
+                store,
+                vocab,
+                shapes,
+                g,
+                next,
+            );
         }
         node
     }
@@ -578,5 +589,103 @@ mod tests {
         let text = canonical(report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]));
         assert!(text.contains("#NodeConstraintComponent"));
         assert!(text.contains("#DatatypeConstraintComponent"));
+    }
+
+    /// A nested result hangs off `sh:detail`, never `sh:result`.
+    ///
+    /// Checking that both component names appear somewhere in the output, as
+    /// the test above does, passes either way — the predicate joining them is
+    /// the thing that was wrong, so it has to be asserted directly.
+    #[test]
+    fn a_nested_result_is_linked_by_sh_detail() {
+        let (mut store, vocab, shapes) = fixture("");
+        let focus = store.named_node("http://ex/a");
+        let inner = ValidationResult::new(
+            focus,
+            vocab.sh_DatatypeConstraintComponent,
+            vocab.sh_Violation,
+        );
+        let mut outer =
+            ValidationResult::new(focus, vocab.sh_NodeConstraintComponent, vocab.sh_Violation);
+        outer.details.push(inner);
+        let report = ValidationReport {
+            results: vec![outer],
+        };
+
+        let g = report.to_oxrdf(&store, &vocab, &shapes, &[vocab.sh_Violation]);
+        let p = |t: TermId| NamedNode::new_unchecked(store.iri(t).unwrap_or_default());
+
+        // Exactly one sh:result — from the report to the outer result — and
+        // exactly one sh:detail, from the outer result to the inner one.
+        assert_eq!(g.triples_for_predicate(&p(vocab.sh_result)).count(), 1);
+        let details: Vec<_> = g.triples_for_predicate(&p(vocab.sh_detail)).collect();
+        assert_eq!(details.len(), 1);
+
+        // And the detail hangs off the *result*, not the report: the object of
+        // sh:result is the subject of sh:detail.
+        let outer_node = g
+            .triples_for_predicate(&p(vocab.sh_result))
+            .next()
+            .expect("a sh:result triple")
+            .object;
+        assert_eq!(outer_node.to_string(), details[0].subject.to_string());
+    }
+
+    /// The nested result must survive a serialise-then-reparse round trip.
+    ///
+    /// This is what the predicate bug actually cost: the reader looks for
+    /// `sh:detail`, so a detail written as `sh:result` came back attached to
+    /// nothing and was silently lost.
+    #[test]
+    fn nested_details_survive_a_round_trip() {
+        let (mut store, vocab, shapes) = fixture("");
+        let focus = store.named_node("http://ex/a");
+        let inner = ValidationResult::new(
+            focus,
+            vocab.sh_DatatypeConstraintComponent,
+            vocab.sh_Violation,
+        );
+        let mut outer =
+            ValidationResult::new(focus, vocab.sh_NodeConstraintComponent, vocab.sh_Violation);
+        outer.details.push(inner);
+        let report = ValidationReport {
+            results: vec![outer],
+        };
+
+        let text = report
+            .serialize(
+                oxrdfio::RdfFormat::Turtle,
+                &store,
+                &vocab,
+                &shapes,
+                &[vocab.sh_Violation],
+            )
+            .expect("the report should serialise");
+
+        let mut store2 = TermStore::new();
+        let vocab2 = Vocab::new(&mut store2);
+        let mut b = crate::model::GraphBuilder::default();
+        crate::model::loader::parse_str(
+            &text,
+            oxrdfio::RdfFormat::Turtle,
+            "http://ex/",
+            0,
+            &mut store2,
+            &mut b,
+        )
+        .expect("the serialised report should parse");
+        let g = b.build();
+        let root = g
+            .subjects(vocab2.rdf_type, vocab2.sh_ValidationReport)
+            .next()
+            .expect("the round-tripped graph should hold a report");
+        let back = ValidationReport::parse(root, &g, &store2, &vocab2).report;
+
+        assert_eq!(back.results.len(), 1, "one top-level result");
+        assert_eq!(back.results[0].details.len(), 1, "its detail came back");
+        assert_eq!(
+            back.results[0].details[0].source_constraint_component,
+            store2.named_node("http://www.w3.org/ns/shacl#DatatypeConstraintComponent")
+        );
     }
 }
