@@ -2,3 +2,6 @@
 **/*.rs.bk
 *.pdb
 /dist
+__pycache__/
+*.py[cod]
+.pytest_cache/
