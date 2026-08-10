@@ -64,10 +64,28 @@ pub struct Report {
     /// True when nothing of blocking severity was reported.
     pub conforms: bool,
     pub results: Vec<Result>,
+    /// The report as RDF, in the form SHACL defines. Held as text because the
+    /// term store it was built from does not outlive the call.
+    pub turtle: String,
 }
 
 #[pymethods]
 impl Report {
+    /// The SHACL validation report as an RDF graph, serialised.
+    ///
+    /// This is the specification's own artefact — a `sh:ValidationReport` —
+    /// and is what to hand to another RDF tool. The attributes above are a
+    /// convenience for reading it from Python.
+    #[pyo3(signature = (format = "turtle"))]
+    fn serialize(&self, format: &str) -> PyResult<String> {
+        match format {
+            "turtle" | "ttl" => Ok(self.turtle.clone()),
+            other => Err(PyValueError::new_err(format!(
+                "unsupported format {other:?}; use \"turtle\""
+            ))),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<Report conforms={} results={}>",
@@ -224,9 +242,20 @@ impl Shapes {
             })
             .collect();
 
+        let turtle = report
+            .serialize(
+                engine::model::loader::RdfFormat::Turtle,
+                store,
+                vocab,
+                &self.shapes_graph,
+                &[vocab.sh_Violation],
+            )
+            .map_err(to_py_err)?;
+
         Ok(Report {
             conforms: report.conforms(&[vocab.sh_Violation]),
             results,
+            turtle,
         })
     }
 }

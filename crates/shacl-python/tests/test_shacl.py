@@ -98,3 +98,32 @@ def test_repeated_validation_does_not_accumulate_state():
     shapes = shacl.Shapes.from_turtle(SHAPES)
     counts = {len(shapes.validate_turtle(INVALID)) for _ in range(20)}
     assert counts == {2}
+
+
+def test_report_is_available_as_rdf():
+    """The specification's artefact is a graph, not a list of strings.
+
+    The attributes are a convenience; `serialize` is what another RDF tool
+    should be handed.
+    """
+    shapes = shacl.Shapes.from_turtle(SHAPES)
+    report = shapes.validate_turtle(INVALID)
+
+    ttl = report.serialize()
+    assert "sh:ValidationReport" in ttl
+    assert "sh:conforms false" in ttl
+    assert "sh:DatatypeConstraintComponent" in ttl
+    assert ttl == report.turtle
+    assert report.serialize("ttl") == ttl
+
+    conforming = shapes.validate_turtle(VALID).serialize()
+    assert "sh:conforms true" in conforming
+    assert "sh:result " not in conforming
+
+
+def test_unknown_serialisation_format_is_rejected():
+    import pytest
+
+    shapes = shacl.Shapes.from_turtle(SHAPES)
+    with pytest.raises(ValueError):
+        shapes.validate_turtle(VALID).serialize("yaml")

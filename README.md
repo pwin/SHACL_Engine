@@ -37,6 +37,31 @@ Three decisions carry most of the performance:
 3. **Compile once.** A shapes graph is compiled into a flat IR before validation
    starts; evaluating a constraint never queries the shapes graph again.
 
+## Output
+
+SHACL defines the validation report as an RDF graph — a `sh:ValidationReport` —
+so that is what `--format` emits. It can be queried, diffed, or fed to another
+tool, none of which a rendered summary supports.
+
+```sh
+shacl -d data.ttl -s shapes.ttl -f turtle     # also: nt, rdfxml, jsonld
+```
+
+```turtle
+_:r0 a sh:ValidationReport ;
+    sh:conforms false ;
+    sh:result _:r1 .
+_:r1 a sh:ValidationResult ;
+    sh:focusNode <http://ex/a> ;
+    sh:resultPath <http://ex/age> ;
+    sh:resultSeverity sh:Violation ;
+    sh:sourceConstraintComponent sh:DatatypeConstraintComponent ;
+    sh:value "old" .
+```
+
+The default, `human`, is a one-line-per-result summary for reading rather than
+parsing. Reach for it at a terminal and for anything else use the RDF.
+
 ## Conformance
 
 The suites are run by a manifest-driven harness covering both kinds of entry:

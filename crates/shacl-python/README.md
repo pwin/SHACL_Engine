@@ -89,3 +89,25 @@ work, which is why the table above scales. Free-threading would only help code
 doing significant Python-level work in parallel as well — and it costs the
 single `abi3` wheel, since `abi3` is a no-op on free-threaded builds and PyO3
 falls back to a version-specific one.
+
+## The report as RDF
+
+SHACL defines the validation report as a graph — a `sh:ValidationReport` — not
+as a list of strings. The attributes above are a convenience for reading it from
+Python; `serialize` is what to hand to another RDF tool.
+
+```python
+print(shapes.validate_file("data.ttl").serialize())
+```
+
+```turtle
+_:r0 a sh:ValidationReport ;
+    sh:conforms false ;
+    sh:result _:r1 .
+_:r1 a sh:ValidationResult ;
+    sh:focusNode <http://ex/a> ;
+    sh:resultPath <http://ex/age> ;
+    sh:resultSeverity sh:Violation ;
+    sh:sourceConstraintComponent sh:DatatypeConstraintComponent ;
+    sh:value "old" .
+```

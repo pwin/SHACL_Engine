@@ -207,6 +207,51 @@ impl ValidationReport {
     }
 }
 
+impl ValidationReport {
+    /// Serialises the report as RDF, in the form the SHACL specification
+    /// defines: a `sh:ValidationReport` carrying `sh:conforms` and one
+    /// `sh:ValidationResult` per violation.
+    ///
+    /// This, rather than any human-readable rendering, is what a SHACL
+    /// processor is meant to hand back — it is a graph, so it can be queried,
+    /// diffed and fed to another tool.
+    pub fn serialize(
+        &self,
+        format: oxrdfio::RdfFormat,
+        store: &TermStore,
+        vocab: &Vocab,
+        shapes: &Graph,
+        disallowed: &[TermId],
+    ) -> crate::Result<String> {
+        let graph = self.to_oxrdf(store, vocab, shapes, disallowed);
+        let mut serializer = oxrdfio::RdfSerializer::from_format(format);
+        // Prefixes are cosmetic in N-Triples but make Turtle readable, which
+        // is the whole reason someone would pick it.
+        for (prefix, iri) in [
+            ("sh", crate::model::vocab::SH),
+            ("rdf", crate::model::vocab::RDF),
+            ("rdfs", crate::model::vocab::RDFS),
+            ("xsd", crate::model::vocab::XSD),
+        ] {
+            serializer = serializer
+                .with_prefix(prefix, iri)
+                .map_err(|e| crate::Error::Io(format!("bad prefix {prefix}: {e}")))?;
+        }
+
+        let mut out = Vec::new();
+        let mut writer = serializer.for_writer(&mut out);
+        for triple in graph.iter() {
+            writer
+                .serialize_triple(triple)
+                .map_err(|e| crate::Error::Io(e.to_string()))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| crate::Error::Io(e.to_string()))?;
+        String::from_utf8(out).map_err(|e| crate::Error::Io(e.to_string()))
+    }
+}
+
 /// A validation report read back out of RDF, plus the severities its author
 /// declared as blocking conformance.
 #[derive(Debug, Clone)]
@@ -432,6 +477,86 @@ mod tests {
             "path structure was not copied"
         );
         assert!(text.contains("<http://ex/parent>"));
+    }
+
+    #[test]
+    fn serialises_a_report_that_parses_back_as_shacl() {
+        let (mut store, vocab, shapes) = fixture("");
+        let focus = store.named_node("http://ex/bob");
+        let value = store.literal("old", "http://www.w3.org/2001/XMLSchema#string", None);
+        let report = ValidationReport {
+            results: vec![
+                ValidationResult::new(
+                    focus,
+                    vocab.sh_DatatypeConstraintComponent,
+                    vocab.sh_Violation,
+                )
+                .with_value(value),
+            ],
+        };
+
+        let turtle = report
+            .serialize(
+                oxrdfio::RdfFormat::Turtle,
+                &store,
+                &vocab,
+                &shapes,
+                &[vocab.sh_Violation],
+            )
+            .expect("serialises");
+
+        // Prefixed rather than expanded: the point of choosing Turtle.
+        assert!(turtle.contains("sh:ValidationReport"), "{turtle}");
+        assert!(turtle.contains("sh:conforms false"), "{turtle}");
+        assert!(
+            turtle.contains("sh:DatatypeConstraintComponent"),
+            "{turtle}"
+        );
+
+        // Round-trip it: reading the report back must yield the same report,
+        // which is what makes it usable by another tool rather than merely
+        // printable.
+        let mut store2 = TermStore::new();
+        let vocab2 = Vocab::new(&mut store2);
+        let mut b = GraphBuilder::new();
+        loader::parse_str(
+            &turtle,
+            RdfFormat::Turtle,
+            "http://r/",
+            0,
+            &mut store2,
+            &mut b,
+        )
+        .expect("the report is well-formed RDF");
+        let g = b.build();
+
+        let root = g
+            .subjects(vocab2.rdf_type, vocab2.sh_ValidationReport)
+            .next()
+            .expect("a sh:ValidationReport node");
+        let parsed = ValidationReport::parse(root, &g, &store2, &vocab2);
+        assert!(!parsed.conforms);
+        assert_eq!(parsed.report.results.len(), 1);
+        assert_eq!(
+            parsed.report.results[0].source_constraint_component,
+            vocab2.sh_DatatypeConstraintComponent
+        );
+    }
+
+    #[test]
+    fn an_empty_report_still_serialises_as_a_report() {
+        let (store, vocab, shapes) = fixture("");
+        let turtle = ValidationReport::default()
+            .serialize(
+                oxrdfio::RdfFormat::Turtle,
+                &store,
+                &vocab,
+                &shapes,
+                &[vocab.sh_Violation],
+            )
+            .unwrap();
+        assert!(turtle.contains("sh:conforms true"), "{turtle}");
+        assert!(!turtle.contains("sh:result "), "{turtle}");
     }
 
     #[test]

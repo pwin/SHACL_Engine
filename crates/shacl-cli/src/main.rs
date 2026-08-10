@@ -27,6 +27,11 @@ struct Args {
     #[arg(short, long)]
     shapes: Option<PathBuf>,
 
+    /// How to render the report. `human` is a summary for reading; the rest
+    /// emit the RDF validation report the SHACL specification defines.
+    #[arg(short, long, value_enum, default_value_t = Format::Human)]
+    format: Format,
+
     /// Print only whether the data conforms, not the individual results.
     #[arg(short, long)]
     quiet: bool,
@@ -38,6 +43,38 @@ struct Args {
     /// Validate `n` times, reporting the best wall time. For benchmarking.
     #[arg(long, default_value_t = 1)]
     repeat: u32,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+enum Format {
+    /// One line per result, for reading rather than parsing.
+    Human,
+    // Aliases because clap derives `n-triples` from the variant name, and
+    // nobody types that.
+    #[value(alias = "ttl")]
+    Turtle,
+    #[value(alias = "ntriples", alias = "nt")]
+    NTriples,
+    #[value(alias = "rdfxml", alias = "xml")]
+    RdfXml,
+    #[value(alias = "jsonld")]
+    JsonLd,
+}
+
+impl Format {
+    /// The RDF syntax to serialise as, or `None` for the human summary.
+    fn rdf(self) -> Option<shacl::model::loader::RdfFormat> {
+        use shacl::model::loader::RdfFormat as F;
+        Some(match self {
+            Self::Human => return None,
+            Self::Turtle => F::Turtle,
+            Self::NTriples => F::NTriples,
+            Self::RdfXml => F::RdfXml,
+            Self::JsonLd => F::JsonLd {
+                profile: Default::default(),
+            },
+        })
+    }
 }
 
 fn main() -> ExitCode {
@@ -103,6 +140,15 @@ fn run() -> Result<bool> {
             compiled.len(),
             report.results.len(),
         );
+    }
+
+    // The RDF report is the specification's own artefact: a graph, so it can be
+    // queried, diffed, or handed to another tool. It carries `sh:conforms`
+    // itself, so nothing is printed alongside it.
+    if let Some(rdf) = args.format.rdf() {
+        let text = report.serialize(rdf, &store, &vocab, shapes_ref, &[vocab.sh_Violation])?;
+        print!("{text}");
+        return Ok(conforms);
     }
 
     println!("conforms: {conforms}");
