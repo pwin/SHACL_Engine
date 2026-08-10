@@ -1,7 +1,9 @@
 //! Reading RDF documents into an indexed [`Graph`].
 
 use std::io::{BufReader, Read};
-use std::path::Path;
+
+use flate2::read::GzDecoder;
+use std::path::{Path, PathBuf};
 
 pub use oxrdfio::RdfFormat;
 use oxrdfio::RdfParser;
@@ -11,8 +13,29 @@ use super::graph::{Graph, GraphBuilder};
 use super::term::TermStore;
 use crate::error::{Error, Result};
 
+/// Whether `path` names a gzip-compressed document.
+///
+/// Decided by the name alone. Sniffing the magic bytes would be more robust
+/// but would mean opening the file to answer a question the caller asks about
+/// a path, sometimes before deciding whether to open it at all.
+pub fn is_gzipped(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("gz"))
+}
+
 /// Guesses an RDF syntax from a file extension.
+///
+/// `.gz` is a wrapper rather than a syntax, so it is stripped first and the
+/// answer comes from what is underneath: `data.ttl.gz` is Turtle.
 pub fn format_from_path(path: &Path) -> Option<RdfFormat> {
+    let stem;
+    let path = if is_gzipped(path) {
+        stem = PathBuf::from(path.file_stem()?);
+        &stem
+    } else {
+        path
+    };
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "ttl" | "turtle" => RdfFormat::Turtle,
@@ -366,16 +389,33 @@ pub fn parse_file(
     let format = format_from_path(path)
         .ok_or_else(|| Error::Parse(format!("unknown RDF syntax for {}", path.display())))?;
     let base = path_to_base_iri(path)?;
+    let gz = is_gzipped(path);
+    let open =
+        || std::fs::File::open(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())));
 
     if format == RdfFormat::Turtle {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+        // Turtle keeps the whole-document path so it can still be split across
+        // threads, which needs random access to find safe chunk boundaries.
+        // Decompressing first costs a pass but keeps that win.
+        let text = if gz {
+            let mut s = String::new();
+            GzDecoder::new(BufReader::new(open()?))
+                .read_to_string(&mut s)
+                .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+            s
+        } else {
+            std::fs::read_to_string(path)
+                .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?
+        };
         return parse_turtle_parallel(&text, &base, scope, store, builder);
     }
 
-    let file =
-        std::fs::File::open(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
-    parse_reader(BufReader::new(file), format, &base, scope, store, builder)
+    let file = BufReader::new(open()?);
+    if gz {
+        parse_reader(GzDecoder::new(file), format, &base, scope, store, builder)
+    } else {
+        parse_reader(file, format, &base, scope, store, builder)
+    }
 }
 
 /// Reads a single file into a standalone graph.
@@ -701,6 +741,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(graph.len(), 1);
+    }
+
+    /// `.gz` names a wrapper, not a syntax, so the answer comes from what is
+    /// underneath it.
+    #[test]
+    fn gzip_is_seen_through_to_the_real_syntax() {
+        let f = |name: &str| format_from_path(std::path::Path::new(name));
+        assert!(matches!(f("g.ttl.gz"), Some(RdfFormat::Turtle)));
+        assert!(matches!(f("g.nt.gz"), Some(RdfFormat::NTriples)));
+        assert!(matches!(f("g.rdf.GZ"), Some(RdfFormat::RdfXml)));
+
+        // A bare `.gz` names no syntax at all, and must not be guessed at.
+        assert!(f("g.gz").is_none());
+        assert!(f("g.txt.gz").is_none());
+
+        let gz = |name: &str| is_gzipped(std::path::Path::new(name));
+        assert!(gz("g.ttl.gz"));
+        assert!(gz("g.ttl.GZ"), "case is not significant");
+        assert!(!gz("g.ttl"));
+        assert!(!gz("gz"));
     }
 
     /// Every format the writer can emit must also be readable, so a report

@@ -1,5 +1,6 @@
 //! `shacl` — validate an RDF data graph against a SHACL shapes graph.
 
+use std::ffi::OsString;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -342,13 +343,22 @@ fn fetch_source(
 
     // The document's own address is its base IRI, so a `<>` self-reference
     // and any relative IRI resolve against where it actually came from.
-    Ok(loader::load_reader(
-        response.body_mut().with_config().limit(limit).reader(),
-        format,
-        url,
-        scope,
-        store,
-    )?)
+    // `ureq` undoes `Content-Encoding: gzip` itself. A URL ending `.gz` is a
+    // different thing — the *document* is compressed, not just the transfer —
+    // and has to be decoded here. The two compose: a `.ttl.gz` served with
+    // transport compression is decoded once by ureq and once again below.
+    let body = response.body_mut().with_config().limit(limit).reader();
+    if url_file_name(url).to_ascii_lowercase().ends_with(".gz") {
+        // The cap is re-applied to the decompressed stream, where it means
+        // what it says: `limit` bytes of compressed data is no bound at all
+        // on what comes out of it.
+        let decoded = Limited {
+            inner: flate2::read::GzDecoder::new(body),
+            left: limit,
+        };
+        return Ok(loader::load_reader(decoded, format, url, scope, store)?);
+    }
+    Ok(loader::load_reader(body, format, url, scope, store)?)
 }
 
 /// What the client says it can read, so a content-negotiating server hands
@@ -356,14 +366,52 @@ fn fetch_source(
 const ACCEPT: &str = "text/turtle, application/n-triples, application/rdf+xml, \
                       application/ld+json, application/trig, application/n-quads;q=0.9, */*;q=0.1";
 
+/// The last path segment of a URL, with any query and fragment removed.
+///
+/// `data.ttl?v=2` has to lose the query before its extension can be read, or
+/// the extension reads as `ttl?v=2` and matches nothing.
+fn url_file_name(url: &str) -> &str {
+    let path = url.split_once(['?', '#']).map_or(url, |(before, _)| before);
+    path.rsplit_once('/').map_or(path, |(_, name)| name)
+}
+
 /// Guesses a syntax from the extension on a URL's path.
 ///
-/// The query and fragment are cut off first: `data.ttl?v=2` is Turtle, and
-/// treating `ttl?v=2` as the extension would find nothing.
+/// The whole file name goes to [`loader::format_from_path`] rather than just
+/// the final extension, so `data.ttl.gz` resolves through the `.gz` to Turtle
+/// rather than stopping at a wrapper that names no syntax.
 fn format_from_url(url: &str) -> Option<loader::RdfFormat> {
-    let path = url.split_once(['?', '#']).map_or(url, |(before, _)| before);
-    let ext = path.rsplit_once('.')?.1;
-    loader::format_from_path(Path::new(&format!("x.{ext}")))
+    let name = url_file_name(url);
+    if !name.contains('.') {
+        return None;
+    }
+    loader::format_from_path(Path::new(name))
+}
+
+/// Reads at most `left` bytes, then fails.
+///
+/// `Read::take` stops silently at the limit, which is the wrong answer here: a
+/// truncated document parses as a valid but incomplete graph and is then
+/// validated as though it were the whole thing. This also sits *after*
+/// decompression, since a few megabytes of gzip can expand without bound and a
+/// limit on the compressed bytes would never notice.
+struct Limited<R> {
+    inner: R,
+    left: u64,
+}
+
+impl<R: std::io::Read> std::io::Read for Limited<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.left == 0 {
+            return Err(std::io::Error::other(
+                "document is larger than the limit; raise --max-download to accept it",
+            ));
+        }
+        let cap = buf.len().min(self.left as usize);
+        let n = self.inner.read(&mut buf[..cap])?;
+        self.left -= n as u64;
+        Ok(n)
+    }
 }
 
 /// Loads one input graph, from a path or, when it is exactly `-`, standard
@@ -457,7 +505,12 @@ fn load_all(
 ///
 /// Only exact matches are rewritten, so a value that happens to read `-df` —
 /// after `--data`, say — is untouched, and `--` still ends option parsing.
-fn translate_pyshacl_shorts(args: impl Iterator<Item = String>) -> Vec<String> {
+///
+/// Works in `OsString` rather than `String`, because a path need not be valid
+/// UTF-8: `std::env::args()` panics on one that is not, which would have made
+/// this refuse a file clap itself would have accepted. `to_str` simply returns
+/// `None` for those, and they pass through as they arrived.
+fn translate_pyshacl_shorts(args: impl Iterator<Item = OsString>) -> Vec<OsString> {
     let mut out = Vec::new();
     let mut literal = false;
     for arg in args {
@@ -470,11 +523,12 @@ fn translate_pyshacl_shorts(args: impl Iterator<Item = String>) -> Vec<String> {
             out.push(arg);
             continue;
         }
-        out.push(match arg.as_str() {
-            "-df" => "--data-format".to_string(),
-            "-sf" => "--shapes-format".to_string(),
-            _ => arg,
-        });
+        let rewritten = match arg.to_str() {
+            Some("-df") => Some("--data-format"),
+            Some("-sf") => Some("--shapes-format"),
+            _ => None,
+        };
+        out.push(rewritten.map_or(arg, OsString::from));
     }
     out
 }
@@ -493,7 +547,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<bool> {
-    let args = Args::parse_from(translate_pyshacl_shorts(std::env::args()));
+    let args = Args::parse_from(translate_pyshacl_shorts(std::env::args_os()));
     let is_stdin = |p: &PathBuf| p.as_os_str() == "-";
     let stdin_count = args
         .data
@@ -726,11 +780,50 @@ mod tests {
         assert!(f("https://ex.org/").is_none());
     }
 
+    /// A URL naming a compressed document resolves to the syntax inside it.
+    #[test]
+    fn a_gzipped_url_names_the_syntax_underneath() {
+        let f = |s: &str| format_from_url(s);
+        assert!(matches!(
+            f("https://ex.org/d.ttl.gz"),
+            Some(loader::RdfFormat::Turtle)
+        ));
+        assert!(matches!(
+            f("https://ex.org/dumps/latest.nt.gz?v=2"),
+            Some(loader::RdfFormat::NTriples)
+        ));
+        // A directory in the path must not be mistaken for the file name.
+        assert!(matches!(
+            f("https://ex.org/a.b.c/d.ttl"),
+            Some(loader::RdfFormat::Turtle)
+        ));
+        assert!(f("https://ex.org/d.gz").is_none());
+        assert!(f("https://ex.org/sparql").is_none());
+    }
+
+    /// An argument need not be valid UTF-8. Reading `std::env::args()` made
+    /// this panic before parsing began, on a path clap itself would take.
+    #[test]
+    fn arguments_that_are_not_utf8_pass_through() {
+        let odd = OsString::from("plain.ttl");
+        let got = translate_pyshacl_shorts(vec![OsString::from("-df"), odd.clone()].into_iter());
+        assert_eq!(got, vec![OsString::from("--data-format"), odd]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            // A lone 0x80 byte is a legal file name and not valid UTF-8.
+            let bad = OsString::from_vec(vec![b'/', 0x80, b'.', b't', b't', b'l']);
+            let got = translate_pyshacl_shorts(vec![bad.clone()].into_iter());
+            assert_eq!(got, vec![bad]);
+        }
+    }
+
     /// pySHACL spells these with one dash and two letters, which clap cannot
     /// parse, so they are rewritten before it sees them.
     #[test]
     fn pyshacl_two_letter_shorts_become_long_options() {
-        let go = |args: &[&str]| translate_pyshacl_shorts(args.iter().map(|s| s.to_string()));
+        let go = |args: &[&str]| translate_pyshacl_shorts(args.iter().map(OsString::from));
         assert_eq!(go(&["-df", "ttl"]), vec!["--data-format", "ttl"]);
         assert_eq!(go(&["-sf", "nt"]), vec!["--shapes-format", "nt"]);
 

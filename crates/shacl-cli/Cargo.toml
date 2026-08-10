@@ -17,6 +17,8 @@ anyhow.workspace = true
 mimalloc = { version = "0.1", default-features = false }
 # `rustls` rather than the platform TLS: the release builds run on three
 # operating systems, and linking OpenSSL would make each of them a separate
-# problem. `default-features = false` drops the JSON and gzip support that a
-# validator has no use for.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+# problem. `gzip` because published RDF is usually compressed — most large
+# dumps ship as `.ttl.gz`, and servers negotiate gzip as a matter of course.
+# JSON support is left out; that one really is of no use here.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

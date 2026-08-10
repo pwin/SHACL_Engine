@@ -92,6 +92,21 @@ rm -f /tmp/shacl-sev.$$.ttl /tmp/shacl-sevd.$$.ttl
 out=$("$SHACL" -d person-valid.ttl -df ttl -s person-shapes.ttl -sf ttl --quiet)
 check "pySHACL -df/-sf spelling"       "conforms: true"  "$out"
 
+# Compressed input, which is how published RDF usually arrives. The syntax
+# comes from underneath the `.gz`, so no --data-format is needed.
+gzip -cf person-valid.ttl > /tmp/shacl-pv.$$.ttl.gz 2>/dev/null
+if [ -s /tmp/shacl-pv.$$.ttl.gz ]; then
+  out=$("$SHACL" -d /tmp/shacl-pv.$$.ttl.gz -s person-shapes.ttl --quiet)
+  check "reads a gzipped data graph"   "conforms: true"  "$out"
+  gzip -cf person-shapes.ttl > /tmp/shacl-ps.$$.ttl.gz
+  out=$("$SHACL" -d /tmp/shacl-pv.$$.ttl.gz -s /tmp/shacl-ps.$$.ttl.gz --quiet)
+  check "gzipped shapes graph too"     "conforms: true"  "$out"
+  gzip -cf person-invalid.ttl > /tmp/shacl-pi.$$.ttl.gz
+  n=$("$SHACL" -d /tmp/shacl-pi.$$.ttl.gz -s person-shapes.ttl | grep -c "ConstraintComponent")
+  check "gzip changes nothing else"    "10"              "$n"
+  rm -f /tmp/shacl-pv.$$.ttl.gz /tmp/shacl-ps.$$.ttl.gz /tmp/shacl-pi.$$.ttl.gz
+fi
+
 # --- the flags added in the CLI round-out
 out=$("$SHACL" -d person-invalid.ttl -s person-shapes.ttl --abort | grep -c "ConstraintComponent")
 check "--abort stops at one result"   "1"  "$out"

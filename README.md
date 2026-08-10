@@ -96,6 +96,34 @@ Only the URLs given on the command line are ever fetched. Nothing in a fetched
 document triggers a further request: `owl:imports` is not followed, so a
 shapes graph cannot reach anywhere you did not name.
 
+### Compressed input
+
+`.gz` is read directly, locally and over HTTP, and the syntax comes from what
+is underneath the wrapper — `dump.ttl.gz` is Turtle. Published RDF is usually
+compressed, so this is the ordinary case rather than a special one.
+
+```sh
+shacl -d dump.nt.gz -s shapes.ttl
+shacl -d https://example.org/dumps/latest.ttl.gz -s shapes.ttl
+```
+
+`--max-download` is applied to the **decompressed** stream. A limit on the
+compressed bytes would be no limit at all: a megabyte of gzip can expand to a
+gigabyte, and it is the expanded size that has to fit in memory.
+
+**Zip is not supported, deliberately.** A `.gz` is one document that happens to
+be compressed, so it slots in where a file would go and nothing else changes. A
+`.zip` is an archive: it holds *members*, and the moment there is more than one
+the tool has to decide which is the data graph — or whether they should be
+merged, and what to do with the README and the licence file sitting alongside
+them. That is a policy with no obviously right answer, and guessing it silently
+is how a validator ends up confidently checking the wrong document. Unpack it
+and pass the files you mean, which `-d` already accepts several of:
+
+```sh
+unzip -q dump.zip -d dump/ && shacl -d dump/*.ttl -s shapes.ttl
+```
+
 ### Coming from pySHACL
 
 Most of its flags work here, spelled the same way: `-df`/`-sf`, `-o`, `-m`/
