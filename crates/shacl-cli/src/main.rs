@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 // Parsing allocates a string per term — millions on a large graph — and the
 // system allocator becomes the contention point once that runs across threads.
@@ -341,24 +341,108 @@ fn fetch_source(
             })?,
     };
 
+    // A server that declares an oversized body is refused before any of it is
+    // transferred. Nothing depends on this — the cap below catches a body that
+    // lies or declares nothing at all — but there is no reason to stream a
+    // gigabyte only to reject it at the end.
+    if let Some(declared) = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        && declared > limit
+    {
+        bail!("{}", too_large(url, limit, Some(declared)));
+    }
+
     // The document's own address is its base IRI, so a `<>` self-reference
     // and any relative IRI resolve against where it actually came from.
     // `ureq` undoes `Content-Encoding: gzip` itself. A URL ending `.gz` is a
     // different thing — the *document* is compressed, not just the transfer —
     // and has to be decoded here. The two compose: a `.ttl.gz` served with
     // transport compression is decoded once by ureq and once again below.
-    let body = response.body_mut().with_config().limit(limit).reader();
-    if url_file_name(url).to_ascii_lowercase().ends_with(".gz") {
-        // The cap is re-applied to the decompressed stream, where it means
-        // what it says: `limit` bytes of compressed data is no bound at all
-        // on what comes out of it.
-        let decoded = Limited {
-            inner: flate2::read::GzDecoder::new(body),
-            left: limit,
-        };
-        return Ok(loader::load_reader(decoded, format, url, scope, store)?);
+    //
+    // ureq's own `limit` is left off deliberately. It enforces the same bound,
+    // but reports it in its own words — naming neither the flag that sets it
+    // nor the size that broke it — and it applies to the compressed stream,
+    // so the two paths below would answer the same question differently
+    // depending on whether the URL happened to end in `.gz`.
+    let tripped = Tripped::default();
+    let body = response.body_mut().with_config().limit(u64::MAX).reader();
+    let body = Limited {
+        inner: body,
+        left: limit,
+        tripped: tripped.clone(),
+    };
+
+    let loaded = if url_file_name(url).to_ascii_lowercase().ends_with(".gz") {
+        // The cap is applied again to the decompressed stream, where it means
+        // what it says: `limit` bytes of compressed data is no bound at all on
+        // what comes out of it. Keeping it on the compressed side too bounds
+        // the pathological stream that expands to almost nothing, which would
+        // otherwise be read for as long as the server cared to send it.
+        loader::load_reader(
+            Limited {
+                inner: flate2::read::GzDecoder::new(body),
+                left: limit,
+                tripped: tripped.clone(),
+            },
+            format,
+            url,
+            scope,
+            store,
+        )
+    } else {
+        loader::load_reader(body, format, url, scope, store)
+    };
+
+    // The reader's error travels back through the parser, which knows nothing
+    // about download limits and can only describe what it saw. The flag says
+    // what actually happened, so the size cap explains itself rather than
+    // arriving as a truncated or unreadable document.
+    match loaded {
+        // Replacing the error rather than wrapping it: what it wraps is the
+        // parser's account of a stream that stopped, which adds nothing to a
+        // limit that can describe itself exactly.
+        Err(_) if tripped.hit() => bail!("{}", too_large(url, limit, None)),
+        other => Ok(other?),
     }
-    Ok(loader::load_reader(body, format, url, scope, store)?)
+}
+
+/// The message for a document that will not fit under the cap.
+///
+/// One wording for both paths, naming the flag that sets the limit — the point
+/// of an error a person can act on is that it says what to do next.
+fn too_large(url: &str, limit: u64, declared: Option<u64>) -> String {
+    let limit = human_bytes(limit);
+    match declared {
+        Some(n) => format!(
+            "{url} is {}, over the {limit} limit; raise --max-download to accept it",
+            human_bytes(n)
+        ),
+        // Unknown by construction: the read stops at the limit, so how much
+        // more was coming is exactly what was never transferred.
+        None => {
+            format!("{url} is larger than the {limit} limit; raise --max-download to accept it")
+        }
+    }
+}
+
+/// Bytes at human scale. `2788903` tells you nothing at a glance; `2.7 MB`
+/// does, and this number exists to be compared against a flag a person types.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 /// What the client says it can read, so a content-negotiating server hands
@@ -398,14 +482,33 @@ fn format_from_url(url: &str) -> Option<loader::RdfFormat> {
 struct Limited<R> {
     inner: R,
     left: u64,
+    tripped: Tripped,
+}
+
+/// Records that a [`Limited`] refused to read further.
+///
+/// Shared rather than returned, because by the time the failure surfaces it
+/// has been through the RDF parser, which reports what it can see — an
+/// unreadable stream — and cannot know a limit caused it. One `Tripped` is
+/// shared by the compressed and decompressed readers of a single fetch: either
+/// firing means the same thing to the caller.
+#[derive(Clone, Default)]
+struct Tripped(std::rc::Rc<std::cell::Cell<bool>>);
+
+impl Tripped {
+    fn hit(&self) -> bool {
+        self.0.get()
+    }
 }
 
 impl<R: std::io::Read> std::io::Read for Limited<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.left == 0 {
-            return Err(std::io::Error::other(
-                "document is larger than the limit; raise --max-download to accept it",
-            ));
+            self.tripped.0.set(true);
+            // Terse: the caller sees `too_large` instead, which knows the URL
+            // and the limit. This text only surfaces if a future caller wires
+            // up a `Limited` and forgets to check the flag.
+            return Err(std::io::Error::other("download limit reached"));
         }
         let cap = buf.len().min(self.left as usize);
         let n = self.inner.read(&mut buf[..cap])?;
@@ -734,6 +837,153 @@ fn run() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serves `body` once, from a real socket, and returns its URL.
+    fn serve(body: Vec<u8>, content_type: &str, name: &str) -> String {
+        serve_framed(body, content_type, name, true)
+    }
+
+    fn serve_framed(body: Vec<u8>, content_type: &str, name: &str, length: bool) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ct = content_type.to_string();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let _ = sock.read(&mut [0u8; 2048]);
+                let framing = if length {
+                    format!("Content-Length: {}\r\n", body.len())
+                } else {
+                    "Transfer-Encoding: chunked\r\n".to_string()
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\n{framing}Connection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(head.as_bytes());
+                if length {
+                    let _ = sock.write_all(&body);
+                } else {
+                    for part in body.chunks(64 * 1024) {
+                        let _ = sock.write_all(format!("{:x}\r\n", part.len()).as_bytes());
+                        let _ = sock.write_all(part);
+                        let _ = sock.write_all(b"\r\n");
+                    }
+                    let _ = sock.write_all(b"0\r\n\r\n");
+                }
+            }
+        });
+        format!("http://{addr}/{name}")
+    }
+
+    fn turtle(triples: usize) -> String {
+        let mut doc = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..triples {
+            doc.push_str(&format!("ex:s{i} ex:p ex:o{i} .\n"));
+        }
+        doc
+    }
+
+    fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        std::io::Write::write_all(&mut enc, bytes).unwrap();
+        enc.finish().unwrap()
+    }
+
+    fn fetch_err(url: &str, limit: u64) -> String {
+        let mut store = TermStore::new();
+        format!(
+            "{:#}",
+            fetch_source(url, None, 0, &mut store, limit).unwrap_err()
+        )
+    }
+
+    /// The size cap has to say it is a size cap.
+    ///
+    /// It reached the user as `parse error: … unexpected end of file` once: the
+    /// protection worked and the diagnosis sent you to look for corruption in a
+    /// document that was fine. Every framing is covered because they take
+    /// different routes out — a declared length is refused before the transfer,
+    /// while a chunked body is only caught as it is read.
+    #[test]
+    fn an_oversized_download_names_the_limit_and_the_flag() {
+        let doc = turtle(200_000);
+        let limit = (doc.len() / 2) as u64;
+        let gz = gzip(doc.as_bytes());
+
+        let cases = [
+            (
+                "declared",
+                serve(doc.clone().into_bytes(), "text/turtle", "d.ttl"),
+            ),
+            ("gzipped", serve(gz.clone(), "application/gzip", "d.ttl.gz")),
+            (
+                "chunked",
+                serve_framed(doc.into_bytes(), "text/turtle", "d.ttl", false),
+            ),
+            (
+                "chunked gzip",
+                serve_framed(gz, "application/gzip", "d.ttl.gz", false),
+            ),
+        ];
+
+        for (case, url) in cases {
+            let err = fetch_err(&url, limit);
+            assert!(
+                err.contains("--max-download"),
+                "{case}: no flag to act on: {err}"
+            );
+            assert!(err.contains("2.7 MB"), "{case}: no limit named: {err}");
+            assert!(
+                !err.contains("parse error"),
+                "{case}: blamed the document: {err}"
+            );
+        }
+    }
+
+    /// The cap counts decompressed bytes, so a small download cannot expand
+    /// past it. 200 KB on the wire against a 4 MB cap: every check on the
+    /// transfer passes, and only the expansion is over.
+    #[test]
+    fn a_compressed_bomb_is_refused_on_its_expanded_size() {
+        // Repeating one statement, which Turtle allows, is what gives a bomb
+        // its ratio — `turtle(n)` writes a distinct subject per line and
+        // manages only about 10:1, not enough to stay under the cap on the
+        // wire while breaking it on expansion.
+        let doc =
+            "@prefix ex: <http://ex/> .\n".to_string() + &"ex:s ex:p ex:o .\n".repeat(2_000_000);
+        let gz = gzip(doc.as_bytes());
+        let limit = 4 * 1024 * 1024;
+        assert!(
+            (gz.len() as u64) < limit / 4,
+            "the wire bytes must sit well under the cap for this to test anything, got {}",
+            gz.len()
+        );
+        assert!(doc.len() as u64 > limit * 4, "and the expansion well over");
+
+        let url = serve(gz, "application/gzip", "bomb.ttl.gz");
+        let err = fetch_err(&url, limit);
+        assert!(err.contains("larger than the 4.0 MB limit"), "{err}");
+    }
+
+    /// The cap is a cap, not a truncation: a document that fits still loads
+    /// whole. Without this the test above passes just as well on a build that
+    /// refuses everything.
+    #[test]
+    fn a_document_inside_the_limit_loads_whole() {
+        let doc = turtle(20_000);
+        let url = serve(gzip(doc.as_bytes()), "application/gzip", "ok.ttl.gz");
+        let mut store = TermStore::new();
+        let graph = fetch_source(&url, None, 0, &mut store, 1 << 30).unwrap();
+        assert_eq!(graph.len(), 20_000);
+    }
+
+    #[test]
+    fn byte_sizes_are_readable() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2_788_903), "2.7 MB");
+        assert_eq!(human_bytes(1 << 30), "1.0 GB");
+    }
 
     #[test]
     fn only_http_urls_are_fetched() {

@@ -109,7 +109,18 @@ shacl -d https://example.org/dumps/latest.ttl.gz -s shapes.ttl
 
 `--max-download` is applied to the **decompressed** stream. A limit on the
 compressed bytes would be no limit at all: a megabyte of gzip can expand to a
-gigabyte, and it is the expanded size that has to fit in memory.
+gigabyte, and it is the expanded size that has to fit in memory. A document
+that declares an oversized `Content-Length` is refused before any of it
+transfers; one that declares nothing, or lies, is caught as it is read.
+
+Exceeding it is reported as what it is, naming the limit and the flag that
+sets it — not as a malformed document, which is what a stream cut short
+otherwise looks like from inside a parser:
+
+```
+error: loading data graph: http://example.org/dump.ttl.gz is larger than the
+4.0 MB limit; raise --max-download to accept it
+```
 
 **Zip is not supported, deliberately.** A `.gz` is one document that happens to
 be compressed, so it slots in where a file would go and nothing else changes. A

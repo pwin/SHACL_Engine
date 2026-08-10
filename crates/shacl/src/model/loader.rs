@@ -167,6 +167,21 @@ pub fn parse_str(
 /// front — splitting it across threads needs random access to find safe cut
 /// points, which a stream cannot offer — so that path deliberately keeps
 /// reading the document whole rather than switching to this one.
+/// Tells a malformed document apart from a reader that failed mid-stream.
+///
+/// A streaming parse surfaces both through one iterator, and calling the
+/// second one a parse error sends the reader off to inspect a document that is
+/// perfectly well-formed. A download stopped at its size cap is the case that
+/// matters: reported as a parse error it reads as corrupt RDF, and the actual
+/// cause — a limit, with a flag to raise it — never reaches the person who
+/// could act on it.
+fn classify(base: &str, e: oxrdfio::RdfParseError) -> Error {
+    match e {
+        oxrdfio::RdfParseError::Io(e) => Error::Io(format!("{base}: {e}")),
+        e => Error::Parse(format!("{base}: {e}")),
+    }
+}
+
 pub fn parse_reader(
     reader: impl Read,
     format: RdfFormat,
@@ -181,7 +196,7 @@ pub fn parse_reader(
         .with_default_graph(oxrdf::GraphName::DefaultGraph);
 
     for quad in parser.for_reader(reader) {
-        let quad = quad.map_err(|e| Error::Parse(format!("{base}: {e}")))?;
+        let quad = quad.map_err(|e| classify(base, e))?;
         let s = store.intern_oxrdf(quad.subject.as_ref().into(), scope);
         let p = store.named_node(quad.predicate.as_str());
         let o = store.intern_oxrdf(quad.object.as_ref(), scope);

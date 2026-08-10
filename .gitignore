@@ -5,3 +5,6 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+# uv writes a `.gitignore` inside the venv too, so this is belt and braces —
+# but it keeps the intent visible to anyone who names their venv differently.
+.venv/
