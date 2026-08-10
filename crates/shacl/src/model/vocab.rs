@@ -153,7 +153,6 @@ vocab! {
         sh_sparql = "sparql",
         sh_select = "select",
         sh_ask = "ask",
-        sh_construct = "construct",
         sh_prefixes = "prefixes",
         sh_declare = "declare",
         sh_prefix = "prefix",
@@ -171,14 +170,11 @@ vocab! {
         sh_Parameter = "Parameter",
         sh_PrefixDeclaration = "PrefixDeclaration",
 
-        // Rules (SHACL-AF)
-        sh_rule = "rule",
-        sh_condition = "condition",
-        sh_SPARQLRule = "SPARQLRule",
-        sh_subject = "subject",
-        sh_predicate = "predicate",
-        sh_object = "object",
-        sh_TripleRule = "TripleRule",
+        // SHACL-AF rules (`sh:rule`, `sh:TripleRule`, `sh:SPARQLRule`) are
+        // deliberately absent rather than pending. Their terms used to be
+        // declared here and referenced nowhere, which reads as partial support
+        // and is worse than none: a shapes graph using rules would have loaded
+        // without complaint and quietly inferred nothing.
 
         // Validation report
         sh_ValidationReport = "ValidationReport",

@@ -78,6 +78,17 @@ all implemented. The nine that remain are named, with the reason for each, in
 `KNOWN_FAILURES` in `tests/w3c.rs` — the suite asserts that list matches what
 actually fails, so it cannot drift.
 
+### Not implemented
+
+Deliberately, rather than pending:
+
+- **SHACL-AF rules** (`sh:rule`, `sh:TripleRule`, `sh:SPARQLRule`). No
+  inference is performed, so a shapes graph relying on rules to derive the
+  triples it then validates will find them absent. pySHACL supports these.
+- **RDFS/OWL-RL pre-inference.** `sh:class` follows `rdfs:subClassOf` in the
+  data graph, as SHACL requires, but nothing else is materialised.
+- **Meta-SHACL** — validating a shapes graph against SHACL-SHACL.
+
 ```sh
 cargo test -p shacl --test w3c -- --nocapture      # summary
 SHACL_TEST_VERBOSE=1 cargo test -p shacl --test w3c -- --nocapture   # per-failure detail
