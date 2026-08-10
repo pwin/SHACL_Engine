@@ -558,6 +558,43 @@ fn file_iris_round_trip_on_both_platform_shapes() {
 /// Raise it as the engine gains coverage.
 const BASELINE_PASSING: usize = 417;
 
+/// The nine of 426 that do not pass, and why. Named here so the gap is
+/// legible without setting `SHACL_TEST_VERBOSE=1` and reading the output.
+///
+/// Every test still runs; this filters nothing. `progress` asserts the set of
+/// failures matches this list exactly, so a name cannot go stale: fixing one
+/// means deleting its line and raising `BASELINE_PASSING`, and a newly broken
+/// test is named in the failure rather than just shrinking a number.
+///
+/// - `sparql/node/prefixes-002` — a global `sh:ShapesGraph` prefix declaration
+///   is not brought into scope, so the query fails to parse.
+/// - `sparql/pre-binding/shapesGraph-001` — `$shapesGraph` is not bound.
+/// - `sparql/pre-binding/pre-binding-006` — a pre-binding that should be
+///   rejected as unsupported is accepted instead.
+/// - `sparql/pre-binding/unsupported-sparql-004` — likewise.
+/// - `sparql/property/property-sparqlExpr-001` — `sh:sparqlExpr` is not
+///   implemented.
+/// - `sparql/property/property-select-001` — result mismatch on a SELECT-based
+///   constraint.
+/// - `core/misc/severity-003` — a per-statement `{| sh:severity … |}`
+///   annotation does not override the shape's severity.
+/// - `core/property/reifierShape-002` — a reifier shape case that still
+///   reports conforming.
+/// - `node-expr/shnex-sparql/seconds-example` — oxigraph returns `"0"` where
+///   the spec's expected output is `"00"`; a lexical form, not a value,
+///   difference.
+const KNOWN_FAILURES: &[&str] = &[
+    "sparql/node/prefixes-002",
+    "sparql/pre-binding/shapesGraph-001",
+    "sparql/pre-binding/pre-binding-006",
+    "sparql/pre-binding/unsupported-sparql-004",
+    "sparql/property/property-sparqlExpr-001",
+    "sparql/property/property-select-001",
+    "core/misc/severity-003",
+    "core/property/reifierShape-002",
+    "node-expr/shnex-sparql/seconds-example",
+];
+
 #[test]
 fn progress() {
     let mut outcomes = Vec::new();
@@ -576,5 +613,29 @@ fn progress() {
     assert!(
         pass >= BASELINE_PASSING,
         "regression: {pass} passing, baseline is {BASELINE_PASSING}"
+    );
+
+    // Name what is failing, not just how much. A count alone cannot tell a
+    // fix from a swap: one test starting to pass while another breaks leaves
+    // it unchanged.
+    let mut failing: Vec<&str> = outcomes
+        .iter()
+        .filter(|o| !matches!(o.status, Status::Pass))
+        .map(|o| o.name.as_str())
+        .collect();
+    failing.sort_unstable();
+    let mut known: Vec<&str> = KNOWN_FAILURES.to_vec();
+    known.sort_unstable();
+
+    let unexpected: Vec<_> = failing.iter().filter(|n| !known.contains(n)).collect();
+    let fixed: Vec<_> = known.iter().filter(|n| !failing.contains(n)).collect();
+    assert!(
+        unexpected.is_empty(),
+        "these tests broke and are not in KNOWN_FAILURES: {unexpected:#?}"
+    );
+    assert!(
+        fixed.is_empty(),
+        "these now pass — delete them from KNOWN_FAILURES and raise \
+         BASELINE_PASSING: {fixed:#?}"
     );
 }

@@ -32,6 +32,15 @@ struct Args {
     #[arg(short, long, value_enum, default_value_t = Format::Human)]
     format: Format,
 
+    /// The least severity that breaks conformance. Results below it are still
+    /// reported, but leave the graph conforming and the exit status 0.
+    ///
+    /// Only `sh:Violation` does so by default, which is already what pySHACL's
+    /// `--allow-warnings` gives you; this is the knob in the other direction,
+    /// for treating warnings — or everything — as failures.
+    #[arg(long, value_enum, default_value_t = Severity::Violation)]
+    min_severity: Severity,
+
     /// Print only whether the data conforms, not the individual results.
     #[arg(short, long)]
     quiet: bool,
@@ -43,6 +52,30 @@ struct Args {
     /// Validate `n` times, reporting the best wall time. For benchmarking.
     #[arg(long, default_value_t = 1)]
     repeat: u32,
+}
+
+/// A severity threshold, ordered as SHACL orders them: Info, Warning,
+/// Violation.
+#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+enum Severity {
+    /// Any result at all breaks conformance.
+    Info,
+    /// Warnings and violations break conformance.
+    Warning,
+    /// Only violations break conformance.
+    Violation,
+}
+
+impl Severity {
+    /// The severities at or above this threshold, which is what
+    /// `ValidationReport::conforms` wants.
+    fn disallowed(self, v: &Vocab) -> Vec<shacl::TermId> {
+        match self {
+            Self::Violation => vec![v.sh_Violation],
+            Self::Warning => vec![v.sh_Violation, v.sh_Warning],
+            Self::Info => vec![v.sh_Violation, v.sh_Warning, v.sh_Info],
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
@@ -128,7 +161,8 @@ fn run() -> Result<bool> {
         best = best.min(t.elapsed());
     }
 
-    let conforms = report.conforms(&[vocab.sh_Violation]);
+    let disallowed = args.min_severity.disallowed(&vocab);
+    let conforms = report.conforms(&disallowed);
 
     if args.timing {
         eprintln!(
@@ -146,7 +180,7 @@ fn run() -> Result<bool> {
     // queried, diffed, or handed to another tool. It carries `sh:conforms`
     // itself, so nothing is printed alongside it.
     if let Some(rdf) = args.format.rdf() {
-        let text = report.serialize(rdf, &store, &vocab, shapes_ref, &[vocab.sh_Violation])?;
+        let text = report.serialize(rdf, &store, &vocab, shapes_ref, &disallowed)?;
         print!("{text}");
         return Ok(conforms);
     }

@@ -74,7 +74,9 @@ excluded, since the spec leaves message text to the implementation.
 **417 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
 SPARQL-based constraints with pre-binding, user-declared constraint components,
 the node expression algebra, SPARQL-selected targets and RDF 1.2 annotations are
-all implemented. The ten that remain are listed in `tests/w3c.rs`.
+all implemented. The nine that remain are named, with the reason for each, in
+`KNOWN_FAILURES` in `tests/w3c.rs` — the suite asserts that list matches what
+actually fails, so it cannot drift.
 
 ```sh
 cargo test -p shacl --test w3c -- --nocapture      # summary
