@@ -906,9 +906,27 @@ impl Engine<'_> {
         let v = self.vocab;
         let severity = sc.severity.unwrap_or(shape.severity);
 
+        // SHACL binds two more variables alongside `$this`: the shape the
+        // constraint hangs off, and an IRI naming the shapes graph, which
+        // `GRAPH $shapesGraph { … }` can then read.
+        let shapes_graph_iri = oxrdf::Term::from(oxrdf::NamedNode::new_unchecked(
+            crate::sparql::SHAPES_GRAPH_IRI,
+        ));
+
         for row in sets.rows() {
             let this = crate::sparql::to_term(row.focus, store);
-            let solutions = crate::sparql::run(&sc.query, &[("this", this)], self.data, store)?;
+            let current_shape = crate::sparql::to_term(shape.node, store);
+            let solutions = crate::sparql::run_in(
+                &sc.query,
+                &[
+                    ("this", this),
+                    ("currentShape", current_shape),
+                    ("shapesGraph", shapes_graph_iri.clone()),
+                ],
+                self.data,
+                store,
+                Some(self.shapes_graph),
+            )?;
 
             // ASK inverts: answering true means the constraint is satisfied.
             let failures: Vec<_> = if sc.is_ask {

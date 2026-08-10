@@ -286,9 +286,10 @@ def test_stubs_match_the_module():
     for cls, method, expected in [
         ("Report", "serialize", {"format": "turtle"}),
         ("Shapes", "from_text", {"format": "turtle", "base": "http://example.org/shapes"}),
-        ("Shapes", "validate_text", {"format": "turtle", "base": "http://example.org/data"}),
+        ("Shapes", "validate_text", {"format": "turtle", "base": "http://example.org/data", "inference": "none"}),
         ("Shapes", "from_turtle", {"base": "http://example.org/shapes"}),
-        ("Shapes", "validate_turtle", {"base": "http://example.org/data"}),
+        ("Shapes", "validate_turtle", {"base": "http://example.org/data", "inference": "none"}),
+        ("Shapes", "validate_file", {"inference": "none"}),
     ]:
         node = next(
             n
@@ -303,3 +304,79 @@ def test_stubs_match_the_module():
             for a, d in zip(args, node.args.defaults)
         }
         assert got == expected, f"{cls}.{method}: stub defaults {got} != {expected}"
+
+
+RDFS_SHAPES = """
+@prefix ex:   <http://ex/> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+ex:PersonShape a sh:NodeShape ;
+  sh:targetClass ex:Person ;
+  sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+"""
+
+# ex:grace is only ever typed ex:Employee. Whether PersonShape applies to her
+# depends entirely on the subclass statement being acted on.
+RDFS_DATA = """
+@prefix ex:   <http://ex/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+ex:Employee rdfs:subClassOf ex:Person .
+ex:grace a ex:Employee .
+"""
+
+
+def test_rdfs_inference_is_off_by_default():
+    """Materialising changes the report, so it must be asked for."""
+    shapes = shacl.Shapes.from_turtle(RDFS_SHAPES)
+    # sh:targetClass already follows rdfs:subClassOf -- SHACL requires that --
+    # so this particular case is caught either way.
+    assert not shapes.validate_turtle(RDFS_DATA).conforms
+
+
+def test_rdfs_inference_reaches_what_shacl_alone_does_not():
+    """sh:targetSubjectsOf sees predicates, and does not follow subPropertyOf.
+
+    This is the gap inference closes: ex:a holds only ex:father, so nothing
+    targets it until ex:parent is materialised.
+    """
+    shapes = shacl.Shapes.from_turtle("""
+@prefix ex: <http://ex/> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+ex:S a sh:NodeShape ;
+  sh:targetSubjectsOf ex:parent ;
+  sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+""")
+    data = """
+@prefix ex: <http://ex/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+ex:father rdfs:subPropertyOf ex:parent .
+ex:a ex:father ex:b .
+"""
+    assert shapes.validate_turtle(data).conforms, "nothing is targeted without inference"
+
+    report = shapes.validate_turtle(data, inference="rdfs")
+    assert not report.conforms
+    assert [r.component for r in report.results] == ["MinCountConstraintComponent"]
+    assert report.results[0].focus_node == "<http://ex/a>"
+
+
+def test_rdfs_inference_types_by_domain_and_range():
+    shapes = shacl.Shapes.from_turtle(RDFS_SHAPES)
+    data = """
+@prefix ex: <http://ex/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+ex:worksFor rdfs:domain ex:Person .
+ex:ada ex:worksFor ex:acme .
+"""
+    assert shapes.validate_turtle(data).conforms
+    # rdfs2 types ex:ada as a Person, which PersonShape then targets.
+    assert not shapes.validate_turtle(data, inference="rdfs").conforms
+
+
+def test_unknown_inference_is_rejected():
+    import pytest
+
+    shapes = shacl.Shapes.from_turtle(RDFS_SHAPES)
+    with pytest.raises(ValueError, match="inference"):
+        shapes.validate_turtle(RDFS_DATA, inference="owlrl")

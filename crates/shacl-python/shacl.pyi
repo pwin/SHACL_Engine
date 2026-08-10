@@ -90,12 +90,15 @@ class Shapes:
         """Compiles a shapes graph from text in any supported format."""
         ...
 
-    def validate_file(self, path: str) -> Report:
+    def validate_file(self, path: str, inference: str = "none") -> Report:
         """Validates a data graph read from a file."""
         ...
 
     def validate_turtle(
-        self, text: str, base: str = "http://example.org/data"
+        self,
+        text: str,
+        base: str = "http://example.org/data",
+        inference: str = "none",
     ) -> Report:
         """Validates a data graph held in memory as Turtle."""
         ...
@@ -105,15 +108,25 @@ class Shapes:
         text: str,
         format: str = "turtle",
         base: str = "http://example.org/data",
+        inference: str = "none",
     ) -> Report:
-        """Validates a data graph held in memory, in any supported format."""
+        """Validates a data graph held in memory, in any supported format.
+
+        `inference` materialises entailed triples into the data graph first:
+        "none" (the default) or "rdfs". Off by default because it changes what
+        the report says, so it should be asked for rather than assumed.
+        """
         ...
 
     def __repr__(self) -> str: ...
     # The number of compiled shapes.
     def __len__(self) -> int: ...
 
-def validate(data_path: str, shapes_path: str | None = None) -> Report:
+def validate(
+    data_path: str,
+    shapes_path: str | None = None,
+    inference: str = "none",
+) -> Report:
     """Validates `data_path` against `shapes_path` in one call.
 
     Use `Shapes` directly when the same shapes are reused — compiling once is

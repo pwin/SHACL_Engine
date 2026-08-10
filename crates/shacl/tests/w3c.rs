@@ -556,9 +556,9 @@ fn file_iris_round_trip_on_both_platform_shapes() {
 
 /// Guards against regressions: the pass count must never drop below this.
 /// Raise it as the engine gains coverage.
-const BASELINE_PASSING: usize = 417;
+const BASELINE_PASSING: usize = 418;
 
-/// The nine of 426 that do not pass, and why. Named here so the gap is
+/// The eight of 426 that do not pass, and why. Named here so the gap is
 /// legible without setting `SHACL_TEST_VERBOSE=1` and reading the output.
 ///
 /// Every test still runs; this filters nothing. `progress` asserts the set of
@@ -568,7 +568,6 @@ const BASELINE_PASSING: usize = 417;
 ///
 /// - `sparql/node/prefixes-002` — a global `sh:ShapesGraph` prefix declaration
 ///   is not brought into scope, so the query fails to parse.
-/// - `sparql/pre-binding/shapesGraph-001` — `$shapesGraph` is not bound.
 /// - `sparql/pre-binding/pre-binding-006` — a pre-binding that should be
 ///   rejected as unsupported is accepted instead.
 /// - `sparql/pre-binding/unsupported-sparql-004` — likewise.
@@ -585,7 +584,6 @@ const BASELINE_PASSING: usize = 417;
 ///   difference.
 const KNOWN_FAILURES: &[&str] = &[
     "sparql/node/prefixes-002",
-    "sparql/pre-binding/shapesGraph-001",
     "sparql/pre-binding/pre-binding-006",
     "sparql/pre-binding/unsupported-sparql-004",
     "sparql/property/property-sparqlExpr-001",

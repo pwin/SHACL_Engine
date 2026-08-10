@@ -27,6 +27,33 @@ fn to_py_err(e: engine::Error) -> PyErr {
     }
 }
 
+/// Which entailed triples to materialise into the data graph before
+/// validating.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Inference {
+    None,
+    Rdfs,
+}
+
+impl Inference {
+    fn parse(name: &str) -> PyResult<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "none" | "" => Ok(Self::None),
+            "rdfs" => Ok(Self::Rdfs),
+            other => Err(PyValueError::new_err(format!(
+                "unknown inference {other:?}; use \"none\" or \"rdfs\""
+            ))),
+        }
+    }
+
+    fn apply(self, data: Graph, vocab: &Vocab) -> Graph {
+        match self {
+            Self::None => data,
+            Self::Rdfs => engine::inference::rdfs_closure(&data, vocab),
+        }
+    }
+}
+
 /// One validation result.
 #[pyclass(frozen, get_all, skip_from_py_object)]
 #[derive(Clone)]
@@ -220,37 +247,56 @@ impl Shapes {
     }
 
     /// Validates a data graph held in memory, in any supported format.
-    #[pyo3(signature = (text, format = "turtle", base = "http://example.org/data"))]
+    ///
+    /// `inference` materialises entailed triples into the data graph before
+    /// validating: `"none"` (the default) or `"rdfs"`. It is off by default
+    /// because it changes what the report says — a `sh:closed` shape starts
+    /// seeing inferred predicates — so it should be asked for rather than
+    /// assumed.
+    #[pyo3(signature = (text, format = "turtle", base = "http://example.org/data", inference = "none"))]
     fn validate_text(
         &self,
         py: Python<'_>,
         text: &str,
         format: &str,
         base: &str,
+        inference: &str,
     ) -> PyResult<Report> {
         let fmt = format_by_name(format)?;
+        let inf = Inference::parse(inference)?;
         py.detach(|| {
             let mut store = self.store.clone();
             let mut b = engine::model::GraphBuilder::new();
             loader::parse_str(text, fmt, base, scope::DATA, &mut store, &mut b)
                 .map_err(to_py_err)?;
-            let data = b.build();
-            self.run(&mut store, &data)
+            self.run(&mut store, &inf.apply(b.build(), &self.vocab))
         })
     }
 
     /// Validates a data graph read from a file.
-    fn validate_file(&self, py: Python<'_>, path: PathBuf) -> PyResult<Report> {
+    ///
+    /// `inference` materialises entailed triples into the data graph first:
+    /// `"none"` (the default) or `"rdfs"`. See `Shapes.validate_text`.
+    #[pyo3(signature = (path, inference = "none"))]
+    fn validate_file(&self, py: Python<'_>, path: PathBuf, inference: &str) -> PyResult<Report> {
+        let inf = Inference::parse(inference)?;
         py.detach(|| {
             let mut store = self.store.clone();
             let data = loader::load_file(&path, scope::DATA, &mut store).map_err(to_py_err)?;
-            self.run(&mut store, &data)
+            self.run(&mut store, &inf.apply(data, &self.vocab))
         })
     }
 
     /// Validates a data graph held in memory as Turtle.
-    #[pyo3(signature = (text, base = "http://example.org/data"))]
-    fn validate_turtle(&self, py: Python<'_>, text: &str, base: &str) -> PyResult<Report> {
+    #[pyo3(signature = (text, base = "http://example.org/data", inference = "none"))]
+    fn validate_turtle(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        base: &str,
+        inference: &str,
+    ) -> PyResult<Report> {
+        let inf = Inference::parse(inference)?;
         py.detach(|| {
             let mut store = self.store.clone();
             let mut b = engine::model::GraphBuilder::new();
@@ -263,8 +309,7 @@ impl Shapes {
                 &mut b,
             )
             .map_err(to_py_err)?;
-            let data = b.build();
-            self.run(&mut store, &data)
+            self.run(&mut store, &inf.apply(b.build(), &self.vocab))
         })
     }
 
@@ -368,13 +413,18 @@ fn format_by_name(name: &str) -> PyResult<engine::report::RdfFormat> {
 /// directly when the same shapes are reused, which is the case worth
 /// optimising for.
 #[pyfunction]
-#[pyo3(signature = (data_path, shapes_path = None))]
-fn validate(py: Python<'_>, data_path: PathBuf, shapes_path: Option<PathBuf>) -> PyResult<Report> {
+#[pyo3(signature = (data_path, shapes_path = None, inference = "none"))]
+fn validate(
+    py: Python<'_>,
+    data_path: PathBuf,
+    shapes_path: Option<PathBuf>,
+    inference: &str,
+) -> PyResult<Report> {
     // A self-describing document carries its own shapes, which is the
     // convention the CLI follows too.
     let shapes_path = shapes_path.unwrap_or_else(|| data_path.clone());
     let shapes = Shapes::from_file(py, shapes_path)?;
-    shapes.validate_file(py, data_path)
+    shapes.validate_file(py, data_path, inference)
 }
 
 /// `gil_used = false` declares the module safe for free-threaded CPython.

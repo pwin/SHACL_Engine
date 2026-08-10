@@ -37,6 +37,13 @@ Three decisions carry most of the performance:
 3. **Compile once.** A shapes graph is compiled into a flat IR before validation
    starts; evaluating a constraint never queries the shapes graph again.
 
+The cost of the second is memory. A graph is held three times over, once per
+permutation, plus the term store — so budget roughly **3 × 12 bytes per triple**
+for the indexes, on top of the interned strings, and expect the whole document
+to be resident: there is no streaming or memory-bounded path. That is the trade
+being made for the lookup behaviour above, and it is the wrong trade for a graph
+too large to hold three sorted copies of.
+
 ## Output
 
 SHACL defines the validation report as an RDF graph — a `sh:ValidationReport` —
@@ -85,9 +92,29 @@ Deliberately, rather than pending:
 - **SHACL-AF rules** (`sh:rule`, `sh:TripleRule`, `sh:SPARQLRule`). No
   inference is performed, so a shapes graph relying on rules to derive the
   triples it then validates will find them absent. pySHACL supports these.
-- **RDFS/OWL-RL pre-inference.** `sh:class` follows `rdfs:subClassOf` in the
-  data graph, as SHACL requires, but nothing else is materialised.
+- **OWL-RL pre-inference.** RDFS entailment *is* available, opt-in — see below
+  — but nothing beyond it.
 - **Meta-SHACL** — validating a shapes graph against SHACL-SHACL.
+
+### RDFS inference
+
+SHACL follows `rdfs:subClassOf` when deciding class membership and nothing
+else, so `sh:targetSubjectsOf ex:parent` will not see a subject holding only
+`ex:father`, whatever `rdfs:subPropertyOf` says. Materialising the RDFS closure
+first closes that gap:
+
+```python
+report = shapes.validate_file("data.ttl", inference="rdfs")
+```
+
+It covers `rdfs2`, `rdfs3`, `rdfs5`, `rdfs7`, `rdfs9` and `rdfs11` — domain,
+range, both hierarchies and their transitivity. The axiomatic and reflexive
+rules are left out: they entail `rdf:type rdfs:Resource` for every term, which
+no shape is improved by.
+
+Off by default, because it changes what the report says — a `sh:closed` shape
+starts seeing inferred predicates, and counts move — so it should be asked for
+rather than assumed.
 
 ```sh
 cargo test -p shacl --test w3c -- --nocapture      # summary

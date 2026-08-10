@@ -34,17 +34,47 @@ use crate::model::{Graph, TermId, TermStore, Vocab};
 pub struct DataAdapter<'a> {
     graph: &'a Graph,
     store: &'a TermStore,
+    /// The shapes graph, reachable as a named graph so a constraint can write
+    /// `GRAPH $shapesGraph { … }`. Absent unless the caller supplied it.
+    shapes: Option<&'a Graph>,
+    /// The id [`SHAPES_GRAPH_IRI`] internalises to, resolved once so the
+    /// pattern match is an integer comparison.
+    shapes_name: Option<TermId>,
     /// Terms minted during evaluation, addressed as `store.len() + index`.
     extra: RefCell<Vec<Term>>,
 }
+
+/// The IRI that names the shapes graph inside a SPARQL constraint.
+///
+/// SHACL says `$shapesGraph` is bound to an IRI standing for the shapes graph
+/// but does not say which, so any stable one will do: what matters is that the
+/// same IRI is bound to the variable and used as the graph name, so that
+/// `GRAPH $shapesGraph { … }` finds it.
+pub const SHAPES_GRAPH_IRI: &str = "urn:x-shacl:shapes-graph";
 
 impl<'a> DataAdapter<'a> {
     pub fn new(graph: &'a Graph, store: &'a TermStore) -> Self {
         Self {
             graph,
             store,
+            shapes: None,
+            shapes_name: None,
             extra: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Exposes `shapes` as the named graph [`SHAPES_GRAPH_IRI`].
+    pub fn with_shapes(mut self, shapes: &'a Graph) -> Self {
+        let name = Term::from(oxrdf::NamedNode::new_unchecked(SHAPES_GRAPH_IRI));
+        // Resolve through the same path the evaluator will, so the id here and
+        // the id a `GRAPH` pattern arrives with are the same one.
+        let id = self
+            .store
+            .get_term(name.as_ref())
+            .unwrap_or_else(|| self.intern_external(name));
+        self.shapes = Some(shapes);
+        self.shapes_name = Some(id);
+        self
     }
 
     fn intern_external(&self, term: Term) -> TermId {
@@ -57,6 +87,41 @@ impl<'a> DataAdapter<'a> {
     }
 }
 
+/// Resolves a triple pattern against one graph.
+///
+/// Picks the index the bound components can seek on, so a pattern with a known
+/// subject or object never degenerates into a full scan.
+fn match_pattern(
+    graph: &Graph,
+    subject: Option<&TermId>,
+    predicate: Option<&TermId>,
+    object: Option<&TermId>,
+) -> Vec<[TermId; 3]> {
+    match (subject, predicate, object) {
+        (Some(&s), Some(&p), Some(&o)) => {
+            if graph.contains(s, p, o) {
+                vec![[s, p, o]]
+            } else {
+                Vec::new()
+            }
+        }
+        (Some(&s), Some(&p), None) => graph.objects(s, p).map(|o| [s, p, o]).collect(),
+        (None, Some(&p), Some(&o)) => graph.subjects(p, o).map(|s| [s, p, o]).collect(),
+        (Some(&s), None, None) => graph.predicate_objects(s).map(|(p, o)| [s, p, o]).collect(),
+        (None, None, Some(&o)) => graph
+            .subject_predicates(o)
+            .map(|(s, p)| [s, p, o])
+            .collect(),
+        (None, Some(&p), None) => graph.iter().filter(|r| r[1] == p).collect(),
+        (Some(&s), None, Some(&o)) => graph
+            .predicate_objects(s)
+            .filter(|&(_, x)| x == o)
+            .map(|(p, _)| [s, p, o])
+            .collect(),
+        (None, None, None) => graph.iter().collect(),
+    }
+}
+
 impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
     type InternalTerm = TermId;
     type Error = Infallible;
@@ -66,46 +131,43 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
         subject: Option<&TermId>,
         predicate: Option<&TermId>,
         object: Option<&TermId>,
-        _graph_name: Option<Option<&TermId>>,
+        graph_name: Option<Option<&TermId>>,
     ) -> impl Iterator<Item = std::result::Result<spareval::InternalQuad<TermId>, Infallible>> + use<'a>
     {
-        // Pick the index that the bound components can seek on, so a pattern
-        // with a known subject or object never degenerates into a full scan.
-        let rows: Vec<[TermId; 3]> = match (subject, predicate, object) {
-            (Some(&s), Some(&p), Some(&o)) => {
-                if self.graph.contains(s, p, o) {
-                    vec![[s, p, o]]
-                } else {
-                    Vec::new()
+        // Which graphs the pattern may draw from. `None` is "any graph", which
+        // is what `GRAPH ?g { … }` asks for and so spans both.
+        let mut sources: Vec<(Option<TermId>, &Graph)> = Vec::new();
+        match graph_name {
+            Some(None) => sources.push((None, self.graph)),
+            Some(Some(&g)) => {
+                if self.shapes_name == Some(g)
+                    && let Some(shapes) = self.shapes
+                {
+                    sources.push((Some(g), shapes));
                 }
             }
-            (Some(&s), Some(&p), None) => self.graph.objects(s, p).map(|o| [s, p, o]).collect(),
-            (None, Some(&p), Some(&o)) => self.graph.subjects(p, o).map(|s| [s, p, o]).collect(),
-            (Some(&s), None, None) => self
-                .graph
-                .predicate_objects(s)
-                .map(|(p, o)| [s, p, o])
-                .collect(),
-            (None, None, Some(&o)) => self
-                .graph
-                .subject_predicates(o)
-                .map(|(s, p)| [s, p, o])
-                .collect(),
-            (None, Some(&p), None) => self.graph.iter().filter(|r| r[1] == p).collect(),
-            (Some(&s), None, Some(&o)) => self
-                .graph
-                .predicate_objects(s)
-                .filter(|&(_, x)| x == o)
-                .map(|(p, _)| [s, p, o])
-                .collect(),
-            (None, None, None) => self.graph.iter().collect(),
-        };
-        rows.into_iter().map(|[s, p, o]| {
+            None => {
+                sources.push((None, self.graph));
+                if let (Some(shapes), Some(name)) = (self.shapes, self.shapes_name) {
+                    sources.push((Some(name), shapes));
+                }
+            }
+        }
+
+        let mut rows: Vec<(Option<TermId>, [TermId; 3])> = Vec::new();
+        for (name, graph) in sources {
+            rows.extend(
+                match_pattern(graph, subject, predicate, object)
+                    .into_iter()
+                    .map(|r| (name, r)),
+            );
+        }
+        rows.into_iter().map(|(g, [s, p, o])| {
             Ok(spareval::InternalQuad {
                 subject: s,
                 predicate: p,
                 object: o,
-                graph_name: None,
+                graph_name: g,
             })
         })
     }
@@ -472,9 +534,27 @@ pub fn run(
     graph: &Graph,
     store: &TermStore,
 ) -> Result<Vec<HashMap<String, Term>>> {
+    run_in(query, bindings, graph, store, None)
+}
+
+/// As [`run`], with the shapes graph reachable as `GRAPH $shapesGraph`.
+///
+/// Separate because most callers have no shapes graph to offer — node
+/// expressions evaluate against an empty one — and passing `None` everywhere
+/// would say less than the name does.
+pub fn run_in(
+    query: &Query,
+    bindings: &[(&str, Term)],
+    graph: &Graph,
+    store: &TermStore,
+    shapes: Option<&Graph>,
+) -> Result<Vec<HashMap<String, Term>>> {
     reject_unsupported(query, bindings)?;
 
-    let adapter = DataAdapter::new(graph, store);
+    let adapter = match shapes {
+        Some(s) => DataAdapter::new(graph, store).with_shapes(s),
+        None => DataAdapter::new(graph, store),
+    };
     let evaluator = QueryEvaluator::new();
     let substituted = substitute(query, bindings);
     let prepared = evaluator.prepare(&substituted);
@@ -621,6 +701,108 @@ mod tests {
 
         let no = parse_query("", "ASK { $this <http://ex/nope> ?o }").unwrap();
         assert_eq!(run(&no, &[("this", this)], &g, &store).unwrap().len(), 0);
+    }
+
+    /// The shapes graph is reachable as a named graph, and the data graph is
+    /// still the default one — a constraint must not see shapes triples
+    /// unless it asks for them by name.
+    #[test]
+    fn the_shapes_graph_is_queryable_by_name() {
+        let (mut store, _, data) = fixture(DATA);
+        let mut b = GraphBuilder::new();
+        loader::parse_str(
+            "@prefix ex: <http://ex/> . ex:S ex:property 42 .",
+            RdfFormat::Turtle,
+            "http://t/",
+            1,
+            &mut store,
+            &mut b,
+        )
+        .unwrap();
+        let shapes = b.build();
+
+        let graph_iri = Term::from(oxrdf::NamedNode::new_unchecked(SHAPES_GRAPH_IRI));
+        let q = parse_query(
+            "",
+            "SELECT ?s WHERE { GRAPH $shapesGraph { ?s <http://ex/property> 42 } }",
+        )
+        .unwrap();
+        let rows = run_in(
+            &q,
+            &[("shapesGraph", graph_iri.clone())],
+            &data,
+            &store,
+            Some(&shapes),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["s"].to_string(), "<http://ex/S>");
+
+        // The default graph is the data graph, and holds none of that.
+        let default_only =
+            parse_query("", "SELECT ?s WHERE { ?s <http://ex/property> 42 }").unwrap();
+        assert!(
+            run_in(&default_only, &[], &data, &store, Some(&shapes))
+                .unwrap()
+                .is_empty(),
+            "shapes triples must not leak into the default graph"
+        );
+
+        // Without a shapes graph the named graph is simply empty, rather than
+        // falling back to the data.
+        assert!(
+            run_in(&q, &[("shapesGraph", graph_iri)], &data, &store, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// `bound($shapesGraph)` and `bound($currentShape)` must both hold, which
+    /// is the whole reason pre-binding is substitution rather than a join.
+    #[test]
+    fn shapes_graph_and_current_shape_are_bound() {
+        let (mut store, _, data) = fixture(DATA);
+        let shape = store.named_node("http://ex/S");
+        let mut b = GraphBuilder::new();
+        loader::parse_str(
+            "@prefix ex: <http://ex/> . ex:S ex:property 42 .",
+            RdfFormat::Turtle,
+            "http://t/",
+            1,
+            &mut store,
+            &mut b,
+        )
+        .unwrap();
+        let shapes = b.build();
+
+        let q = parse_query(
+            "",
+            "SELECT $this WHERE {
+                FILTER bound($shapesGraph) .
+                GRAPH $shapesGraph {
+                    FILTER bound($currentShape) .
+                    $currentShape <http://ex/property> 42 .
+                }
+            }",
+        )
+        .unwrap();
+        let a = store.named_node("http://ex/a");
+        let rows = run_in(
+            &q,
+            &[
+                ("this", to_term(a, &store)),
+                ("currentShape", to_term(shape, &store)),
+                (
+                    "shapesGraph",
+                    Term::from(oxrdf::NamedNode::new_unchecked(SHAPES_GRAPH_IRI)),
+                ),
+            ],
+            &data,
+            &store,
+            Some(&shapes),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]
