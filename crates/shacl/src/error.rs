@@ -14,6 +14,8 @@ pub enum Error {
     Shape(String),
     /// A SPARQL query could not be parsed or evaluated.
     Sparql(String),
+    /// Materialising entailed triples would cost more than was allowed.
+    Inference(String),
     /// Validation nested deeper than the engine allows. Reported rather than
     /// truncated: a report quietly missing results would be worse than none.
     Recursion(String),
@@ -27,6 +29,7 @@ impl fmt::Display for Error {
             Self::Shape(m) => write!(f, "invalid shapes graph: {m}"),
             Self::Sparql(m) => write!(f, "SPARQL error: {m}"),
             Self::Recursion(m) => write!(f, "recursion limit exceeded: {m}"),
+            Self::Inference(m) => write!(f, "inference limit exceeded: {m}"),
         }
     }
 }

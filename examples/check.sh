@@ -67,6 +67,31 @@ out=$("$SHACL" -d /tmp/shacl-report.$$.ttl --quiet); rc=$?
 rm -f /tmp/shacl-report.$$.ttl
 check "report parses as RDF"          "conforms: true"  "$out"
 
+# The cap counts only results that break conformance. Stopping on a warning
+# while a violation sat unreached elsewhere reported `conforms: true` on a
+# graph that does not conform -- the worst kind of wrong answer.
+cat > /tmp/shacl-sev.$$.ttl <<'TTL'
+@prefix ex: <http://example.org/ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+ex:WarnShape a sh:NodeShape ; sh:targetNode ex:a ;
+  sh:property [ sh:path ex:w ; sh:minCount 1 ; sh:severity sh:Warning ] .
+ex:ViolShape a sh:NodeShape ; sh:targetNode ex:b ;
+  sh:property [ sh:path ex:v ; sh:minCount 1 ; sh:severity sh:Violation ] .
+TTL
+cat > /tmp/shacl-sevd.$$.ttl <<'TTL'
+@prefix ex: <http://example.org/ns#> .
+ex:a ex:x 1 .
+ex:b ex:y 2 .
+TTL
+out=$("$SHACL" -d /tmp/shacl-sevd.$$.ttl -s /tmp/shacl-sev.$$.ttl --abort --quiet); rc=$?
+check "--abort is severity-aware"      "conforms: false" "$out"
+check "--abort keeps the exit status"  "1"               "$rc"
+rm -f /tmp/shacl-sev.$$.ttl /tmp/shacl-sevd.$$.ttl
+
+# pySHACL spells the format overrides with one dash and two letters.
+out=$("$SHACL" -d person-valid.ttl -df ttl -s person-shapes.ttl -sf ttl --quiet)
+check "pySHACL -df/-sf spelling"       "conforms: true"  "$out"
+
 # --- the flags added in the CLI round-out
 out=$("$SHACL" -d person-invalid.ttl -s person-shapes.ttl --abort | grep -c "ConstraintComponent")
 check "--abort stops at one result"   "1"  "$out"

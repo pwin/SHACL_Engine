@@ -71,6 +71,7 @@ pub fn validate_in_with(
         vocab,
         shnex: crate::nodeexpr::Shnex::new(store),
         max_results: options.max_results,
+        blocking: options.blocking.clone(),
     };
     let mut results = Vec::new();
     let mut stack = Stack::default();
@@ -103,7 +104,26 @@ pub fn validate_in_with(
     // since the constraint in flight when the limit is reached finishes its
     // own row. Trimming here makes the report say what was asked for.
     if let Some(n) = options.max_results {
-        results.truncate(n);
+        match &options.blocking {
+            // Cut just after the nth blocking result. A blind `truncate(n)`
+            // could drop the only result that breaks conformance and leave
+            // the report contradicting itself.
+            Some(severities) => {
+                let mut seen = 0;
+                let mut cut = results.len();
+                for (i, r) in results.iter().enumerate() {
+                    if severities.contains(&r.severity) {
+                        seen += 1;
+                        if seen == n {
+                            cut = i + 1;
+                            break;
+                        }
+                    }
+                }
+                results.truncate(cut);
+            }
+            None => results.truncate(n),
+        }
     }
     Ok(ValidationReport { results })
 }
@@ -131,8 +151,11 @@ pub fn node_conforms(
         shapes_graph: data,
         vocab,
         shnex: crate::nodeexpr::Shnex::new(store),
-        // A yes/no question, so one result is all it ever needs.
+        // A yes/no question, so one result is all it ever needs, and every
+        // result counts: `sh:node` asks whether the shape produced anything,
+        // not how severe it was.
         max_results: Some(1),
+        blocking: None,
     };
     engine.conforms(id, node, &mut Stack::default(), store)
 }
@@ -144,27 +167,45 @@ struct Engine<'a> {
     shapes_graph: &'a Graph,
     vocab: &'a Vocab,
     shnex: crate::nodeexpr::Shnex,
-    /// Stop once this many results are in hand. `None` reports everything.
+    /// Stop once this many blocking results are in hand. `None` reports
+    /// everything.
     max_results: Option<usize>,
+    /// Severities that count towards `max_results`; `None` counts them all.
+    blocking: Option<Vec<TermId>>,
 }
 
 /// How much of the graph to validate.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Options {
-    /// Abandon validation once this many results exist.
+    /// Abandon validation once this many *conformance-blocking* results exist.
     ///
     /// This is a real early exit, not a truncation of a finished report: the
     /// work stops, which is the only reason to ask for it. The consequence is
     /// that the report is no longer a complete account of the graph, so the
     /// count is the caller's choice rather than a default.
     pub max_results: Option<usize>,
+
+    /// Which severities block conformance, and so count towards the cap.
+    ///
+    /// `None` counts every result, which is what an internal yes/no question
+    /// wants: `sh:node` and friends care whether a shape produced anything at
+    /// all, not how severe it was.
+    ///
+    /// A caller reporting to a user must pass the same severities it will
+    /// later judge conformance by. Counting every result instead would let the
+    /// run stop on an `sh:Info`, report `sh:conforms true`, and leave an
+    /// `sh:Violation` sitting unexamined further along — the shapes are
+    /// evaluated in whatever order they compiled in, so which kind is met
+    /// first says nothing about what is in the graph.
+    pub blocking: Option<Vec<TermId>>,
 }
 
 impl Options {
-    /// Stop at the first result, as `--abort-on-first` does.
-    pub fn first_only() -> Self {
+    /// Stop at the first result that would break conformance.
+    pub fn first_blocking(severities: Vec<TermId>) -> Self {
         Self {
             max_results: Some(1),
+            blocking: Some(severities),
         }
     }
 }
@@ -208,8 +249,27 @@ impl Engine<'_> {
     /// individual result: those are the points where stopping is cheap and
     /// leaves the report coherent, and a per-result check would cost more on
     /// the overwhelmingly common uncapped path than it could ever save.
+    ///
+    /// Only blocking results count, so stopping can never turn a graph that
+    /// does not conform into one that appears to. When nothing blocks, the
+    /// cap is never reached and the whole graph is validated — which is the
+    /// right answer, since that is the only way to be sure.
     fn enough(&self, results: &[ValidationResult]) -> bool {
-        self.max_results.is_some_and(|n| results.len() >= n)
+        let Some(n) = self.max_results else {
+            return false;
+        };
+        match &self.blocking {
+            None => results.len() >= n,
+            // Linear, but only ever walked while a cap is set, and a cap keeps
+            // the list short by construction.
+            Some(severities) => {
+                results
+                    .iter()
+                    .filter(|r| severities.contains(&r.severity))
+                    .count()
+                    >= n
+            }
+        }
     }
 
     // ------------------------------------------------------------- targeting

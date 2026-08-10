@@ -46,10 +46,10 @@ impl Inference {
         }
     }
 
-    fn apply(self, data: Graph, vocab: &Vocab) -> Graph {
+    fn apply(self, data: Graph, vocab: &Vocab) -> PyResult<Graph> {
         match self {
-            Self::None => data,
-            Self::Rdfs => engine::inference::rdfs_closure(&data, vocab),
+            Self::None => Ok(data),
+            Self::Rdfs => engine::inference::rdfs_closure(&data, vocab).map_err(to_py_err),
         }
     }
 }
@@ -269,7 +269,7 @@ impl Shapes {
             let mut b = engine::model::GraphBuilder::new();
             loader::parse_str(text, fmt, base, scope::DATA, &mut store, &mut b)
                 .map_err(to_py_err)?;
-            self.run(&mut store, &inf.apply(b.build(), &self.vocab))
+            self.run(&mut store, &inf.apply(b.build(), &self.vocab)?)
         })
     }
 
@@ -283,7 +283,7 @@ impl Shapes {
         py.detach(|| {
             let mut store = self.store.clone();
             let data = loader::load_file(&path, scope::DATA, &mut store).map_err(to_py_err)?;
-            self.run(&mut store, &inf.apply(data, &self.vocab))
+            self.run(&mut store, &inf.apply(data, &self.vocab)?)
         })
     }
 
@@ -309,7 +309,7 @@ impl Shapes {
                 &mut b,
             )
             .map_err(to_py_err)?;
-            self.run(&mut store, &inf.apply(b.build(), &self.vocab))
+            self.run(&mut store, &inf.apply(b.build(), &self.vocab)?)
         })
     }
 

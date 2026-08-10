@@ -28,14 +28,29 @@
 //! rdfs:Resource` for every term, which no SHACL shape is improved by and
 //! which would inflate a graph several times over for nothing.
 
+use crate::error::{Error, Result};
 use crate::model::{Graph, GraphBuilder, TermId, Vocab};
+
+/// How large the closure may grow before it is abandoned, by default.
+///
+/// The closure of a schema is not linear in its size: `n` classes in a
+/// `rdfs:subClassOf` chain entail `n²/2` transitive statements, so a modest
+/// document can name a very large graph. Running out of memory partway is a
+/// worse answer than refusing, and refusing is honest — the caller asked for
+/// something whose cost they may not have known.
+pub const DEFAULT_MAX_TRIPLES: usize = 50_000_000;
 
 /// Returns `graph` with its RDFS consequences added.
 ///
 /// Runs to a fixpoint, so chains of any length close: `ex:a rdfs:subClassOf
 /// ex:b rdfs:subClassOf ex:c` yields the `ex:a rdfs:subClassOf ex:c` that
 /// `rdfs9` then needs to type instances of `ex:a` as `ex:c`.
-pub fn rdfs_closure(graph: &Graph, vocab: &Vocab) -> Graph {
+pub fn rdfs_closure(graph: &Graph, vocab: &Vocab) -> Result<Graph> {
+    rdfs_closure_bounded(graph, vocab, DEFAULT_MAX_TRIPLES)
+}
+
+/// As [`rdfs_closure`], abandoning the work past `max_triples`.
+pub fn rdfs_closure_bounded(graph: &Graph, vocab: &Vocab, max_triples: usize) -> Result<Graph> {
     let mut triples: Vec<[TermId; 3]> = graph.iter().collect();
     triples.sort_unstable();
     triples.dedup();
@@ -98,6 +113,15 @@ pub fn rdfs_closure(graph: &Graph, vocab: &Vocab) -> Graph {
         triples.extend(derived);
         triples.sort_unstable();
         triples.dedup();
+
+        // Checked after deduplicating, so the figure is triples actually held
+        // rather than an over-count of what a round proposed.
+        if triples.len() > max_triples {
+            return Err(Error::Inference(format!(
+                "RDFS closure exceeded {max_triples} triples; \
+                 the schema entails more than this will materialise"
+            )));
+        }
         if triples.len() == before {
             break;
         }
@@ -107,7 +131,7 @@ pub fn rdfs_closure(graph: &Graph, vocab: &Vocab) -> Graph {
     for [s, p, o] in triples {
         b.push(s, p, o);
     }
-    b.build()
+    Ok(b.build())
 }
 
 /// Every `(subject, object)` of `predicate`.
@@ -138,7 +162,7 @@ mod tests {
             &mut b,
         )
         .unwrap();
-        let g = rdfs_closure(&b.build(), &vocab);
+        let g = rdfs_closure(&b.build(), &vocab).expect("closure should fit the default bound");
         (store, vocab, g)
     }
 
@@ -274,5 +298,99 @@ mod tests {
         let text = "@prefix ex: <http://ex/> . ex:a ex:p ex:b . ex:b ex:q 1 .";
         let (_, _, g) = closure(text);
         assert_eq!(g.len(), 2, "no axiomatic or reflexive triples added");
+    }
+
+    /// The closure is not linear in the input: `n` classes in a chain entail
+    /// `n²/2` transitive statements. Past the bound it must say so rather than
+    /// run the machine out of memory.
+    #[test]
+    fn an_expensive_closure_is_refused_rather_than_attempted() {
+        let mut store = TermStore::new();
+        let vocab = Vocab::new(&mut store);
+        let chain = |n: usize, store: &mut TermStore| {
+            let mut text = String::from(
+                "@prefix ex: <http://ex/> .\n\
+                 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n",
+            );
+            for i in 0..n {
+                text.push_str(&format!("ex:C{i} rdfs:subClassOf ex:C{}.\n", i + 1));
+            }
+            let mut b = GraphBuilder::new();
+            loader::parse_str(&text, RdfFormat::Turtle, "http://t/", 0, store, &mut b).unwrap();
+            b.build()
+        };
+
+        // 40 links entail ~800 statements, so a generous bound finishes and a
+        // tight one does not. Kept short deliberately: transitive closure is
+        // quadratic in the number of pairs, so a long chain would make this
+        // test the slowest thing in the suite for no extra confidence.
+        let small = chain(40, &mut store);
+        assert!(rdfs_closure_bounded(&small, &vocab, 1_000_000).is_ok());
+        match rdfs_closure_bounded(&small, &vocab, 100) {
+            Err(crate::Error::Inference(m)) => assert!(m.contains("100"), "message: {m}"),
+            other => panic!("expected an inference limit error, got {other:?}"),
+        }
+
+        // A chain long enough to be genuinely expensive is refused early
+        // rather than worked through — which is the point of the bound.
+        let large = chain(2_000, &mut store);
+        assert!(matches!(
+            rdfs_closure_bounded(&large, &vocab, 10_000),
+            Err(crate::Error::Inference(_))
+        ));
+    }
+
+    /// Inference and `sh:closed` interact, and the direction is surprising
+    /// enough to pin: materialising adds predicates, and a closed shape then
+    /// objects to them. This is the reason inference is opt-in, so it is worth
+    /// a test rather than only a sentence in the docs.
+    #[test]
+    fn inference_can_make_a_closed_shape_fail() {
+        let shapes_text = "@prefix ex: <http://ex/> .
+             @prefix sh: <http://www.w3.org/ns/shacl#> .
+             ex:S a sh:NodeShape ;
+                 sh:targetNode ex:a ;
+                 sh:closed true ;
+                 sh:property [ sh:path ex:father ] .";
+        let data_text = "@prefix ex: <http://ex/> .
+             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+             ex:father rdfs:subPropertyOf ex:parent .
+             ex:a ex:father ex:b .";
+
+        let mut store = TermStore::new();
+        let vocab = Vocab::new(&mut store);
+        let parse = |text: &str, scope: u32, store: &mut TermStore| {
+            let mut b = GraphBuilder::new();
+            loader::parse_str(text, RdfFormat::Turtle, "http://t/", scope, store, &mut b).unwrap();
+            b.build()
+        };
+        let data = parse(data_text, 0, &mut store);
+        let shapes_graph = parse(shapes_text, 1, &mut store);
+        let compiled = crate::shapes::Shapes::compile(&shapes_graph, &store, &vocab).unwrap();
+
+        let plain =
+            crate::validate::validate_in(&data, &compiled, &shapes_graph, &mut store, &vocab)
+                .unwrap();
+        assert!(
+            plain.conforms(&[vocab.sh_Violation]),
+            "ex:a holds only ex:father, which the shape permits"
+        );
+
+        // rdfs7 adds `ex:a ex:parent ex:b`, which `sh:closed` has no place for.
+        let inferred = rdfs_closure(&data, &vocab).unwrap();
+        let after =
+            crate::validate::validate_in(&inferred, &compiled, &shapes_graph, &mut store, &vocab)
+                .unwrap();
+        assert!(
+            !after.conforms(&[vocab.sh_Violation]),
+            "the inferred predicate is not among those the shape allows"
+        );
+        assert!(
+            after
+                .results
+                .iter()
+                .any(|r| r.source_constraint_component == vocab.sh_ClosedConstraintComponent),
+            "and it is the closedness that objects"
+        );
     }
 }

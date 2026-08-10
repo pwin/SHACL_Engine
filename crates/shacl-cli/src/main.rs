@@ -100,6 +100,11 @@ struct Args {
     #[arg(short, long)]
     quiet: bool,
 
+    /// Largest document to accept from a URL, in bytes. A server can stream
+    /// without end, which no timeout catches.
+    #[arg(long, value_name = "BYTES", default_value_t = FETCH_LIMIT)]
+    max_download: u64,
+
     /// Report how long loading, compiling and validating each took.
     #[arg(long)]
     timing: bool,
@@ -272,6 +277,16 @@ fn url_of(path: &Path) -> Option<&str> {
 /// How long to wait for a document, end to end.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How much of a fetched document to read before giving up.
+///
+/// `ureq`'s reader is unbounded by default — its own documentation says a
+/// malicious server could exhaust the client's memory — and a timeout does not
+/// help, since a server can stream fast and forever. This engine holds a graph
+/// roughly three times over in its indexes, so a gigabyte of RDF is already
+/// past what the machine will take; refusing it is kinder than being killed by
+/// the OOM killer halfway through.
+const FETCH_LIMIT: u64 = 1 << 30;
+
 /// Fetches an RDF document over HTTP.
 ///
 /// The syntax is settled in the order the caller's intent runs: an explicit
@@ -289,6 +304,7 @@ fn fetch_source(
     forced: Option<InputFormat>,
     scope: u32,
     store: &mut TermStore,
+    limit: u64,
 ) -> Result<Graph> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(FETCH_TIMEOUT))
@@ -327,7 +343,7 @@ fn fetch_source(
     // The document's own address is its base IRI, so a `<>` self-reference
     // and any relative IRI resolve against where it actually came from.
     Ok(loader::load_reader(
-        response.body_mut().as_reader(),
+        response.body_mut().with_config().limit(limit).reader(),
         format,
         url,
         scope,
@@ -363,6 +379,7 @@ fn load_source(
     forced: Option<InputFormat>,
     scope: u32,
     store: &mut TermStore,
+    limit: u64,
 ) -> Result<Graph> {
     if path.as_os_str() == "-" {
         let format = forced
@@ -377,7 +394,7 @@ fn load_source(
     }
 
     if let Some(url) = url_of(path) {
-        return fetch_source(url, forced, scope, store);
+        return fetch_source(url, forced, scope, store, limit);
     }
 
     match forced {
@@ -408,17 +425,18 @@ fn load_all(
     forced: Option<InputFormat>,
     base: u32,
     store: &mut TermStore,
+    limit: u64,
 ) -> Result<Graph> {
     // The single-document case is the overwhelming majority, and keeping it on
     // the plain scope leaves blank node labels in reports as they were.
     if let [only] = paths {
-        return load_source(only, forced, base, store);
+        return load_source(only, forced, base, store, limit);
     }
 
     let mut merged = Vec::new();
     for (i, path) in paths.iter().enumerate() {
         let scope = scope::FIRST_DYNAMIC + base * 1024 + i as u32;
-        let g = load_source(path, forced, scope, store)
+        let g = load_source(path, forced, scope, store, limit)
             .with_context(|| format!("loading {}", describe(path)))?;
         merged.extend(g.iter());
     }
@@ -428,6 +446,37 @@ fn load_all(
         b.push(s, p, o);
     }
     Ok(b.build())
+}
+
+/// Rewrites pySHACL's multi-character short options into long ones.
+///
+/// pySHACL is built on `argparse`, which allows `-df`; clap does not, and no
+/// combination of aliases makes it. Since these are advertised as compatible,
+/// they are translated here rather than left as a footnote saying the flag you
+/// already know does not work.
+///
+/// Only exact matches are rewritten, so a value that happens to read `-df` —
+/// after `--data`, say — is untouched, and `--` still ends option parsing.
+fn translate_pyshacl_shorts(args: impl Iterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut literal = false;
+    for arg in args {
+        if literal {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            literal = true;
+            out.push(arg);
+            continue;
+        }
+        out.push(match arg.as_str() {
+            "-df" => "--data-format".to_string(),
+            "-sf" => "--shapes-format".to_string(),
+            _ => arg,
+        });
+    }
+    out
 }
 
 fn main() -> ExitCode {
@@ -444,7 +493,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<bool> {
-    let args = Args::parse();
+    let args = Args::parse_from(translate_pyshacl_shorts(std::env::args()));
     let is_stdin = |p: &PathBuf| p.as_os_str() == "-";
     let stdin_count = args
         .data
@@ -467,17 +516,30 @@ fn run() -> Result<bool> {
     let vocab = Vocab::new(&mut store);
 
     let t0 = Instant::now();
-    let mut data = load_all(&args.data, args.data_format, scope::DATA, &mut store)
-        .context("loading data graph")?;
+    let mut data = load_all(
+        &args.data,
+        args.data_format,
+        scope::DATA,
+        &mut store,
+        args.max_download,
+    )
+    .context("loading data graph")?;
     if args.inference == Inference::Rdfs {
-        data = shacl::inference::rdfs_closure(&data, &vocab);
+        data = shacl::inference::rdfs_closure(&data, &vocab)
+            .context("materialising RDFS entailments")?;
     }
     let shapes_graph = if shapes_paths == args.data {
         None
     } else {
         Some(
-            load_all(&shapes_paths, args.shapes_format, scope::SHAPES, &mut store)
-                .context("loading shapes graph")?,
+            load_all(
+                &shapes_paths,
+                args.shapes_format,
+                scope::SHAPES,
+                &mut store,
+                args.max_download,
+            )
+            .context("loading shapes graph")?,
         )
     };
     let shapes_ref = shapes_graph.as_ref().unwrap_or(&data);
@@ -514,28 +576,6 @@ fn run() -> Result<bool> {
         .context("compiling shapes graph")?;
     let compile_time = t1.elapsed();
 
-    // `--abort` is the common spelling of a cap of one; if both are given the
-    // smaller wins, since each is a ceiling rather than a target.
-    let max_results = match (args.abort, args.max_results) {
-        (true, Some(n)) => Some(n.min(1)),
-        (true, None) => Some(1),
-        (false, n) => n,
-    };
-    let options = shacl::validate::Options { max_results };
-
-    let t2 = Instant::now();
-    let mut report = shacl::validate::validate_in_with(
-        &data, &compiled, shapes_ref, &mut store, &vocab, options,
-    )?;
-    let mut best = t2.elapsed();
-    for _ in 1..args.repeat {
-        let t = Instant::now();
-        report = shacl::validate::validate_in_with(
-            &data, &compiled, shapes_ref, &mut store, &vocab, options,
-        )?;
-        best = best.min(t.elapsed());
-    }
-
     // pySHACL spells the default as a pair of flags. They are honoured rather
     // than ignored: passing one alongside a `--min-severity` that contradicts
     // it means the graph should still be allowed to hold results at that
@@ -548,6 +588,45 @@ fn run() -> Result<bool> {
         severity = Severity::Violation;
     }
     let disallowed = severity.disallowed(&vocab);
+
+    // `--abort` is the common spelling of a cap of one; if both are given the
+    // smaller wins, since each is a ceiling rather than a target.
+    let max_results = match (args.abort, args.max_results) {
+        (true, Some(n)) => Some(n.min(1)),
+        (true, None) => Some(1),
+        (false, n) => n,
+    };
+    // The cap must count exactly the severities conformance is judged by,
+    // resolved above. Stopping on a result that does not block would let the
+    // run print `conforms: true` with a violation still unexamined.
+    let options = shacl::validate::Options {
+        max_results,
+        blocking: Some(disallowed.clone()),
+    };
+
+    let t2 = Instant::now();
+    let mut report = shacl::validate::validate_in_with(
+        &data,
+        &compiled,
+        shapes_ref,
+        &mut store,
+        &vocab,
+        options.clone(),
+    )?;
+    let mut best = t2.elapsed();
+    for _ in 1..args.repeat {
+        let t = Instant::now();
+        report = shacl::validate::validate_in_with(
+            &data,
+            &compiled,
+            shapes_ref,
+            &mut store,
+            &vocab,
+            options.clone(),
+        )?;
+        best = best.min(t.elapsed());
+    }
+
     let conforms = report.conforms(&disallowed);
 
     if args.timing {
@@ -645,6 +724,27 @@ mod tests {
         // No extension to go on: the caller must be told, not guessed at.
         assert!(f("https://ex.org/sparql").is_none());
         assert!(f("https://ex.org/").is_none());
+    }
+
+    /// pySHACL spells these with one dash and two letters, which clap cannot
+    /// parse, so they are rewritten before it sees them.
+    #[test]
+    fn pyshacl_two_letter_shorts_become_long_options() {
+        let go = |args: &[&str]| translate_pyshacl_shorts(args.iter().map(|s| s.to_string()));
+        assert_eq!(go(&["-df", "ttl"]), vec!["--data-format", "ttl"]);
+        assert_eq!(go(&["-sf", "nt"]), vec!["--shapes-format", "nt"]);
+
+        // A value that merely looks like one is left alone.
+        assert_eq!(
+            go(&["--data", "--", "-df"]),
+            vec!["--data", "--", "-df"],
+            "`--` ends option parsing"
+        );
+        // And anything unrecognised passes straight through.
+        assert_eq!(
+            go(&["-d", "x.ttl", "--abort"]),
+            vec!["-d", "x.ttl", "--abort"]
+        );
     }
 
     /// `--abort` and `--max-results` are both ceilings, so the lower wins

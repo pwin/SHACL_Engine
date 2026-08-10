@@ -98,8 +98,10 @@ shapes graph cannot reach anywhere you did not name.
 
 ### Coming from pySHACL
 
-Most of its flags work here: `-df`/`-sf`, `-o`, `-m`/`--metashacl`, `-i`,
-`-w`/`--allow-warnings`, `--allow-info`, `--abort`. Two differences worth
+Most of its flags work here, spelled the same way: `-df`/`-sf`, `-o`, `-m`/
+`--metashacl`, `-i`, `-w`/`--allow-warnings`, `--allow-info`, `--abort`. The
+two-letter short options are translated for compatibility — clap has no
+multi-character shorts of its own — so `--df` works too. Two differences worth
 knowing:
 
 - `-f` has no `table`; `human` is the readable format.
@@ -116,10 +118,10 @@ sequence. Expected and actual reports are compared through one in-memory
 representation rather than by diffing serialised RDF; `sh:resultMessage` is
 excluded, since the spec leaves message text to the implementation.
 
-**417 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
+**418 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
 SPARQL-based constraints with pre-binding, user-declared constraint components,
 the node expression algebra, SPARQL-selected targets and RDF 1.2 annotations are
-all implemented. The nine that remain are named, with the reason for each, in
+all implemented. The eight that remain are named, with the reason for each, in
 `KNOWN_FAILURES` in `tests/w3c.rs` — the suite asserts that list matches what
 actually fails, so it cannot drift.
 
@@ -131,8 +133,7 @@ Deliberately, rather than pending:
   inference is performed, so a shapes graph relying on rules to derive the
   triples it then validates will find them absent. pySHACL supports these.
 - **OWL-RL pre-inference.** RDFS entailment *is* available, opt-in — see below
-  — but nothing beyond it.
-- **Meta-SHACL** — validating a shapes graph against SHACL-SHACL.
+  — but nothing beyond it. Meta-SHACL is available too, as `--meta-shacl`.
 
 ### RDFS inference
 

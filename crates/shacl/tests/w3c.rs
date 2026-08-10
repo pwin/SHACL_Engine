@@ -593,6 +593,38 @@ const KNOWN_FAILURES: &[&str] = &[
     "node-expr/shnex-sparql/seconds-example",
 ];
 
+/// The README's conformance figures must match the suite.
+///
+/// They have drifted twice: prose is not checked by anything, so it goes stale
+/// the moment a test starts passing. `KNOWN_FAILURES` fixed the list; this
+/// fixes the numbers, which are what a reader actually takes away.
+#[test]
+fn the_readme_states_the_real_numbers() {
+    let readme =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md"))
+            .expect("README.md should be readable");
+
+    let total = BASELINE_PASSING + KNOWN_FAILURES.len();
+    let passing = format!("**{BASELINE_PASSING} of {total}** tests pass");
+    assert!(
+        readme.contains(&passing),
+        "README should say {passing:?}; update it when the count moves"
+    );
+
+    // The count of remaining failures is spelled out in words, which is the
+    // part that went stale last time.
+    let remaining = match KNOWN_FAILURES.len() {
+        8 => "eight",
+        9 => "nine",
+        10 => "ten",
+        n => panic!("no spelling for {n} remaining failures; add one here"),
+    };
+    assert!(
+        readme.contains(&format!("The {remaining} that remain")),
+        "README should say {remaining:?} tests remain"
+    );
+}
+
 #[test]
 fn progress() {
     let mut outcomes = Vec::new();
