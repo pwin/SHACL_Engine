@@ -204,14 +204,22 @@ jobs:
           mkdir -p dist
           cp staged/wheels-*/*.whl staged/sdist/*.tar.gz dist/
           ls -la dist
-      # Dispatching from a branch would upload whatever that branch currently
-      # holds, under the version in Cargo.toml — which need not be what the tag
-      # of that version actually published.
-      - name: Refuse to publish from a branch
+      # Real PyPI must come from a tag: dispatching from a branch would upload
+      # whatever that branch currently holds, under the version in Cargo.toml,
+      # which need not be what the tag of that version published. TestPyPI is
+      # disposable, so a rehearsal may run from anywhere — and has to be able
+      # to, since a workflow_dispatch uses the workflow file from the ref it is
+      # given, so a tag cut before this job existed cannot run it.
+      - name: Check the ref suits the index
+        env:
+          INDEX: ${{ inputs.pypi_repository }}
         run: |
           case "$GITHUB_REF" in
-            refs/tags/*) echo "publishing $GITHUB_REF_NAME" ;;
-            *) echo "::error::Run this workflow against a tag, not $GITHUB_REF_NAME"; exit 1 ;;
+            refs/tags/*) echo "publishing $GITHUB_REF_NAME to $INDEX" ;;
+            *) if [ "$INDEX" = "pypi" ]; then
+                 echo "::error::Publishing to PyPI needs a tag, not $GITHUB_REF_NAME"; exit 1
+               fi
+               echo "::warning::Rehearsing $GITHUB_REF_NAME on $INDEX; only a tag may reach PyPI" ;;
           esac
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
