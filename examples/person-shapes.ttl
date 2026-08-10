@@ -1,0 +1,88 @@
+# Shapes for the person examples.
+#
+# Deliberately spans the constraint families you are most likely to reach for,
+# one of each, so a violation in the report can be traced back to exactly one
+# line here.
+
+@prefix ex:   <http://example.org/ns#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# A small class hierarchy. SHACL reads class membership from the *data* graph,
+# so this has to travel with the data — see ex:Employee in the data files.
+ex:Agent    a rdfs:Class .
+ex:Person   a rdfs:Class ; rdfs:subClassOf ex:Agent .
+ex:Employee a rdfs:Class ; rdfs:subClassOf ex:Person .
+
+ex:PersonShape
+    a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+
+    # Exactly one name, a string of at least two characters.
+    sh:property [
+        sh:path ex:name ;
+        sh:name "name" ;
+        sh:minCount 1 ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:string ;
+        sh:minLength 2 ;
+    ] ;
+
+    # Optional age, but if present an integer in a plausible range.
+    sh:property [
+        sh:path ex:age ;
+        sh:name "age" ;
+        sh:maxCount 1 ;
+        sh:datatype xsd:integer ;
+        sh:minInclusive 0 ;
+        sh:maxInclusive 150 ;
+    ] ;
+
+    # At least one email, matching a deliberately simple pattern.
+    sh:property [
+        sh:path ex:email ;
+        sh:name "email" ;
+        sh:minCount 1 ;
+        sh:nodeKind sh:Literal ;
+        sh:pattern "^[^@ ]+@[^@ ]+\\.[a-z]{2,}$" ;
+    ] ;
+
+    # A closed vocabulary of values.
+    sh:property [
+        sh:path ex:status ;
+        sh:name "status" ;
+        sh:maxCount 1 ;
+        sh:in ( "active" "inactive" "on-leave" ) ;
+    ] ;
+
+    # Links must be IRIs, and must point at something typed as an Agent.
+    sh:property [
+        sh:path ex:knows ;
+        sh:name "knows" ;
+        sh:nodeKind sh:IRI ;
+        sh:class ex:Agent ;
+    ] ;
+
+    # A sequence path: everyone this person knows must themselves have a name
+    # that is a string. Reached by walking ex:knows and then ex:name.
+    sh:property [
+        sh:path ( ex:knows ex:name ) ;
+        sh:name "name of an acquaintance" ;
+        sh:datatype xsd:string ;
+    ] ;
+.
+
+# Employees additionally need a department. Separate from PersonShape so the
+# two can be seen firing independently in a report.
+ex:EmployeeShape
+    a sh:NodeShape ;
+    sh:targetClass ex:Employee ;
+    sh:property [
+        sh:path ex:department ;
+        sh:name "department" ;
+        sh:minCount 1 ;
+        sh:nodeKind sh:IRI ;
+    ] ;
+.

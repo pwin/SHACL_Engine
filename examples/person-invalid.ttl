@@ -1,0 +1,78 @@
+# Data that breaks person-shapes.ttl. Expect `conforms: false`.
+#
+# Each subject below breaks exactly one constraint, and says which in its
+# rdfs:comment, so a report can be checked line by line. Everything else about
+# each subject is deliberately valid.
+
+@prefix ex:   <http://example.org/ns#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+ex:Agent    a rdfs:Class .
+ex:Person   a rdfs:Class ; rdfs:subClassOf ex:Agent .
+ex:Employee a rdfs:Class ; rdfs:subClassOf ex:Person .
+
+ex:noName
+    a ex:Person ;
+    rdfs:comment "MinCountConstraintComponent: ex:name is required" ;
+    ex:email "nn@example.org" .
+
+ex:shortName
+    a ex:Person ;
+    rdfs:comment "MinLengthConstraintComponent: ex:name must be 2+ characters" ;
+    ex:name "A" ;
+    ex:email "sn@example.org" .
+
+ex:twoNames
+    a ex:Person ;
+    rdfs:comment "MaxCountConstraintComponent: at most one ex:name" ;
+    ex:name "Grace Hopper", "Grace B. Hopper" ;
+    ex:email "tn@example.org" .
+
+ex:numericName
+    a ex:Person ;
+    rdfs:comment "DatatypeConstraintComponent: ex:name must be xsd:string" ;
+    ex:name 42 ;
+    ex:email "num@example.org" .
+
+ex:impossibleAge
+    a ex:Person ;
+    rdfs:comment "MaxInclusiveConstraintComponent: ex:age must be <= 150" ;
+    ex:name "Methuselah" ;
+    ex:age 969 ;
+    ex:email "old@example.org" .
+
+ex:badEmail
+    a ex:Person ;
+    rdfs:comment "PatternConstraintComponent: ex:email must look like an address" ;
+    ex:name "Bad Email" ;
+    ex:email "not-an-email" .
+
+ex:noEmail
+    a ex:Person ;
+    rdfs:comment "MinCountConstraintComponent: at least one ex:email is required" ;
+    ex:name "No Email" .
+
+ex:badStatus
+    a ex:Person ;
+    rdfs:comment "InConstraintComponent: ex:status is not one of the allowed values" ;
+    ex:name "Bad Status" ;
+    ex:email "bs@example.org" ;
+    ex:status "pending" .
+
+ex:knowsANonAgent
+    a ex:Person ;
+    rdfs:comment "ClassConstraintComponent: ex:knows must point at an ex:Agent" ;
+    ex:name "Knows A Teapot" ;
+    ex:email "kt@example.org" ;
+    ex:knows ex:teapot .
+
+# Not typed as an Agent, which is what makes the link above fail.
+ex:teapot a ex:Teapot .
+
+ex:employeeWithoutDepartment
+    a ex:Employee ;
+    rdfs:comment "MinCountConstraintComponent: an ex:Employee needs an ex:department" ;
+    ex:name "Dept Less" ;
+    ex:email "dl@example.org" .

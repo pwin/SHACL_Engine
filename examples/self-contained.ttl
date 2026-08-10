@@ -1,0 +1,27 @@
+# Shapes and data in one document.
+#
+# With no `--shapes`, the CLI reads the shapes from the data graph, which is the
+# convention for a self-describing document:
+#
+#     shacl -d examples/self-contained.ttl
+#
+# Expect `conforms: false` and one result: ex:bob's age is not an integer.
+
+@prefix ex:   <http://example.org/ns#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+ex:PersonShape
+    a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+    sh:property [
+        sh:path ex:age ;
+        sh:datatype xsd:integer ;
+        sh:message "age must be a whole number" ;
+    ] ;
+.
+
+ex:alice a ex:Person ; ex:age 34 .
+ex:bob   a ex:Person ; ex:age "thirty-four" .

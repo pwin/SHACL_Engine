@@ -1,0 +1,37 @@
+# Data that conforms to person-shapes.ttl. Expect `conforms: true`.
+#
+# The class hierarchy is repeated here because SHACL resolves class membership
+# in the data graph. Without it, ex:class ex:Agent would fail for everyone and
+# ex:Employee instances would not be recognised as ex:Person at all.
+
+@prefix ex:   <http://example.org/ns#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+ex:Agent    a rdfs:Class .
+ex:Person   a rdfs:Class ; rdfs:subClassOf ex:Agent .
+ex:Employee a rdfs:Class ; rdfs:subClassOf ex:Person .
+
+ex:ada
+    a ex:Person ;
+    ex:name "Ada Lovelace" ;
+    ex:age 36 ;
+    ex:email "ada@example.org" ;
+    ex:status "active" ;
+    ex:knows ex:grace .
+
+ex:grace
+    a ex:Employee ;          # an Employee is a Person, so PersonShape applies too
+    ex:name "Grace Hopper" ;
+    ex:age 85 ;
+    ex:email "grace@example.org", "ghopper@navy.example" ;
+    ex:status "on-leave" ;
+    ex:department ex:Computing ;
+    ex:knows ex:ada .
+
+# No ex:age at all: the shape allows it to be absent.
+ex:alan
+    a ex:Person ;
+    ex:name "Alan Turing" ;
+    ex:email "alan@example.org" .
