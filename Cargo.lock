@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "shacl"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "foldhash",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-python"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "pyo3",
  "shacl",
