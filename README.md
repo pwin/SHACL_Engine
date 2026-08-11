@@ -77,6 +77,17 @@ means a `_:label` written in the source does not survive into the report. RDF
 treats blank node labels as local syntax rather than identity, so a processor
 is free to relabel; this one does.
 
+This holds across machines, not just across runs: `tests/determinism.rs` pins
+the exact bytes of a report, and CI runs it on Linux, Windows and 64-bit ARM
+macOS, so the claim is checked rather than assumed.
+
+What it does **not** promise is stability between releases. Adding a
+constraint, or changing the order shapes compile in, changes which result is
+`_:r1` — the pinned test turns that into a visible failure to be accepted
+deliberately, but it does mean a report checked into version control can move
+under a version bump. Compare reports from one version, or compare them as
+graphs rather than as text.
+
 ## Inputs
 
 `--data` and `--shapes` each take a path, an `http(s)` URL, or `-` for standard
@@ -163,6 +174,35 @@ the node expression algebra, SPARQL-selected targets and RDF 1.2 annotations are
 all implemented. The eight that remain are named, with the reason for each, in
 `KNOWN_FAILURES` in `tests/w3c.rs` — the suite asserts that list matches what
 actually fails, so it cannot drift.
+
+### Recursion
+
+SHACL allows a shape to refer to itself, directly or through a cycle, and the
+specification leaves what to do about it to the implementation. Cycles are
+detected — a (shape, focus node) pair already being validated is not entered
+again — so an ordinary recursive shape terminates and reports normally.
+
+There is also a hard ceiling of **48 levels of nesting**, and reaching it is an
+error rather than a partial report:
+
+```
+error: recursion limit exceeded: shapes nested more than 48 deep
+```
+
+The ceiling exists because cycle detection alone does not bound the descent:
+the number of distinct (shape, node) pairs is the product of the two, so a
+recursive shape walked over a long data chain — a linked list of a few hundred
+items — can still exhaust the call stack. A stack overflow is not a panic, so
+it cannot be caught or turned into an error; it takes the process down, and
+with it any host embedding the engine. Refusing early is what makes the failure
+recoverable.
+
+48 is far more nesting than a hand-written shapes graph uses, and it is set
+well below where the stack actually runs out because the cost of a level is not
+fixed — one carrying a SPARQL constraint is much more expensive than one
+carrying `sh:datatype`. If you hit it, the shapes are almost certainly walking
+a data structure rather than nesting: raising the number would not help, since
+the fix is to move the descent off the call stack.
 
 ### Not implemented
 

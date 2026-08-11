@@ -889,6 +889,78 @@ mod tests {
         enc.finish().unwrap()
     }
 
+    /// Writes `docs` into a fresh directory and returns their paths.
+    ///
+    /// `tag` keeps concurrent tests apart: cargo runs them on separate
+    /// threads, so a shared directory name would have them deleting each
+    /// other's fixtures mid-run.
+    fn scratch(tag: &str, docs: &[(&str, &str)]) -> (PathBuf, Vec<PathBuf>) {
+        let dir = std::env::temp_dir().join(format!("shacl-test-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = docs
+            .iter()
+            .map(|(name, text)| {
+                let p = dir.join(name);
+                std::fs::write(&p, text).unwrap();
+                p
+            })
+            .collect();
+        (dir, paths)
+    }
+
+    /// `_:a` in two documents names two different nodes.
+    ///
+    /// RDF scopes a blank node label to the document that introduced it, so
+    /// merging files under one scope would weld unrelated nodes together — and
+    /// silently: the merged graph stays well-formed and simply describes one
+    /// node where there were two, which no later validation can detect.
+    #[test]
+    fn blank_nodes_stay_separate_across_merged_documents() {
+        let (dir, paths) = scratch(
+            "merged",
+            &[
+                ("one.ttl", "@prefix ex: <http://ex/> .\n_:a ex:p ex:one .\n"),
+                ("two.ttl", "@prefix ex: <http://ex/> .\n_:a ex:p ex:two .\n"),
+            ],
+        );
+
+        let mut store = TermStore::new();
+        let graph = load_all(&paths, None, 0, &mut store, 1 << 30).unwrap();
+
+        let subjects: std::collections::HashSet<_> = graph.iter().map(|[s, _, _]| s).collect();
+        assert_eq!(
+            subjects.len(),
+            2,
+            "the two `_:a` labels were merged into one node"
+        );
+        assert!(subjects.iter().all(|&s| store.is_blank(s)));
+        assert_eq!(graph.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same label in one document is one node, which is the other half of
+    /// the rule — separating per document must not separate within one.
+    #[test]
+    fn a_repeated_label_in_one_document_is_one_node() {
+        let (dir, paths) = scratch(
+            "repeated",
+            &[(
+                "both.ttl",
+                "@prefix ex: <http://ex/> .\n_:a ex:p ex:one .\n_:a ex:p ex:two .\n",
+            )],
+        );
+
+        let mut store = TermStore::new();
+        let graph = load_all(&paths, None, 0, &mut store, 1 << 30).unwrap();
+
+        let subjects: std::collections::HashSet<_> = graph.iter().map(|[s, _, _]| s).collect();
+        assert_eq!(subjects.len(), 1, "one label became two nodes");
+        assert_eq!(graph.len(), 2);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn fetch_err(url: &str, limit: u64) -> String {
         let mut store = TermStore::new();
         format!(

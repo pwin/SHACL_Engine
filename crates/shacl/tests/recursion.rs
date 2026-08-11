@@ -148,6 +148,49 @@ ex:Root a sh:NodeShape ; sh:targetNode ex:a0 ; sh:property ex:Q .
     }
 }
 
+/// The README documents the limit and quotes the error. Both are the kind of
+/// prose that goes stale silently — a reader who trusts a stale number debugs
+/// the wrong thing — so the number is asserted against the message the engine
+/// actually produces rather than maintained by hand.
+#[test]
+fn the_readme_quotes_the_real_recursion_error() {
+    let shapes = r#"
+@prefix ex: <http://example.org/ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+ex:Q a sh:PropertyShape ; sh:path ex:knows ; sh:property ex:Q .
+ex:Root a sh:NodeShape ; sh:targetNode ex:a0 ; sh:property ex:Q .
+"#;
+    let mut data = String::from("@prefix ex: <http://example.org/ns#> .\n");
+    for i in 0..500 {
+        data.push_str(&format!("ex:a{i} ex:knows ex:a{}.\n", i + 1));
+    }
+    let Err(err) = validate(&data, shapes) else {
+        panic!("expected a recursion error");
+    };
+
+    let readme = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+    )
+    .expect("README.md should be readable");
+
+    // `Display` prefixes "recursion limit exceeded:", which is what a user
+    // sees, so the README is checked against the whole rendered line.
+    let line = err.to_string();
+    assert!(
+        readme.contains(&line),
+        "README should quote the real error, which is:\n{line}"
+    );
+
+    let depth: usize = line
+        .split_whitespace()
+        .find_map(|w| w.parse().ok())
+        .expect("the message should name the depth");
+    assert!(
+        readme.contains(&format!("**{depth} levels of nesting**")),
+        "README should say {depth} levels; update it when MAX_DEPTH moves"
+    );
+}
+
 /// `sh:memberShape` recursed without the guard too.
 #[test]
 fn a_recursive_member_shape_terminates() {
