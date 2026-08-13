@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "shacl"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "flate2",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-cli"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-python"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "pyo3",
  "shacl",
