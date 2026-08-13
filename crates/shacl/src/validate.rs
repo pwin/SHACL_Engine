@@ -214,6 +214,16 @@ impl Options {
 #[derive(Default)]
 struct Stack {
     pairs: Vec<(ShapeId, TermId)>,
+    /// The same pairs, for membership in constant time.
+    ///
+    /// `pairs` keeps insertion order so a level can be unwound; it is a poor
+    /// thing to *search*, and searching it is the common case. One level
+    /// pushes a pair per focus node, so a node shape over N focus nodes leaves
+    /// N entries behind, and every property shape beneath it then scanned all
+    /// N once per node — quadratic in the size of the data, for the ordinary
+    /// shape of a shapes graph rather than for any recursive edge case. At
+    /// 100k instances that was 44 seconds of validation against 0.6 of load.
+    seen: hashbrown::HashSet<(ShapeId, TermId)>,
     /// Nesting level, which `pairs.len()` does not give: one level pushes a
     /// pair per focus node rather than a single pair.
     depth: usize,
@@ -378,7 +388,7 @@ impl Engine<'_> {
             filtered = focus
                 .iter()
                 .copied()
-                .filter(|&n| !stack.pairs.contains(&(id, n)))
+                .filter(|&n| !stack.seen.contains(&(id, n)))
                 .collect();
             if filtered.is_empty() {
                 return Ok(());
@@ -398,6 +408,7 @@ impl Engine<'_> {
 
         let mark = stack.pairs.len();
         stack.pairs.extend(focus.iter().map(|&n| (id, n)));
+        stack.seen.extend(focus.iter().map(|&n| (id, n)));
         stack.depth += 1;
         let mut outcome = Ok(());
         for constraint in &shape.constraints {
@@ -416,6 +427,13 @@ impl Engine<'_> {
             }
         }
         stack.depth -= 1;
+        // Unwind both together. Removing by value is idempotent, which is what
+        // makes a repeated focus node — possible at the top level, where the
+        // filter above is skipped because nothing can have been visited yet —
+        // safe to push twice and drop once.
+        for pair in &stack.pairs[mark..] {
+            stack.seen.remove(pair);
+        }
         stack.pairs.truncate(mark);
         outcome
     }

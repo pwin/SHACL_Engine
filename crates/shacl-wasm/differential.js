@@ -12,6 +12,12 @@
 // bytes. The two builds intern terms in a different order, so blank node
 // labels in a report can legitimately differ; the findings cannot.
 //
+// A blank node is therefore compared as "a blank node" rather than by label.
+// RDF says a label is local syntax carrying no identity, the two sides scope
+// theirs differently, and the JS surface renders them differently again -- so
+// requiring the text to match would fail on 36 documents where every finding
+// is otherwise identical, which is noise rather than signal.
+//
 // Usage: node differential.js [--limit N]
 const fs = require('node:fs');
 const path = require('node:path');
@@ -36,20 +42,43 @@ function walk(dir, out = []) {
 
 // A W3C test file is self-contained: it carries the shapes and the data it is
 // meant to be validated against, which is why both sides can use it as both.
+// `_:1_b1` from the N-Triples report, `1:b1` from the JS surface: the same
+// node, spelled by two different layers.
+const anon = (t) => (t && (t.startsWith('_:') || /^\d+[:_]b\d+$/.test(t)) ? '<blank>' : t);
+
 function viaWasm(text) {
   const v = Validator.fromTurtle(text, 'http://example.org/test');
   const r = v.validateTurtle(text, 'http://example.org/test');
-  return r.results.map((x) => `${x.component}|${x.severity}|${x.focusNode}|${x.path ?? ''}`).sort();
+  return r.results.map((x) => `${x.component}|${x.severity}|${anon(x.focusNode)}|${x.path ?? ""}`).sort();
 }
 
 function viaCli(file) {
-  const out = execFileSync(CLI, ['-d', file, '-s', file, '-f', 'nt'], {
-    encoding: 'utf8',
-    maxBuffer: 1 << 28,
-  });
+  // Exit 1 means "does not conform", which is the expected outcome for most of
+  // this corpus, so it is a result rather than a failure. Anything else is a
+  // real error and must not be read as an empty report.
+  let out;
+  try {
+    out = execFileSync(CLI, ['-d', file, '-s', file, '-f', 'nt'], {
+      encoding: 'utf8',
+      maxBuffer: 1 << 28,
+    });
+  } catch (e) {
+    if (e.status !== 1) throw e;
+    out = e.stdout ?? '';
+  }
   // Rebuild the same tuples from the RDF report.
+  //
+  // Only top-level results: those are what the JS `results` array exposes.
+  // A constraint like `sh:memberShape` also emits nested results hung off
+  // `sh:detail`, which are in the RDF report and not in the array, so counting
+  // both sides' subjects would compare two different things.
+  const topLevel = new Set();
   const byResult = new Map();
   const P = 'http://www.w3.org/ns/shacl#';
+  for (const line of out.split('\n')) {
+    const m = line.match(/^\S+ <([^>]+)> (\S+) \.$/);
+    if (m && m[1] === `${P}result`) topLevel.add(m[2]);
+  }
   for (const line of out.split('\n')) {
     const m = line.match(/^(\S+) <([^>]+)> (.+) \.$/);
     if (!m) continue;
@@ -57,13 +86,22 @@ function viaCli(file) {
     if (!pred.startsWith(P)) continue;
     const key = pred.slice(P.length);
     if (!['sourceConstraintComponent', 'resultSeverity', 'focusNode', 'resultPath'].includes(key)) continue;
-    const obj = objRaw.startsWith('<') ? objRaw.slice(1, -1) : objRaw.replace(/^"|"$/g, '');
+    // Match the JS surface's rendering: an IRI bare, and a literal as its
+    // lexical form with the datatype and language tag dropped -- that is the
+    // RDF/JS `.value` convention the bindings deliberately follow, so a
+    // literal focus node reads `7` there and `"7"^^xsd:integer` here.
+    let obj;
+    if (objRaw.startsWith('<')) obj = objRaw.slice(1, -1);
+    else if (objRaw.startsWith('"')) obj = objRaw.slice(1, objRaw.lastIndexOf('"'));
+    else obj = objRaw;
     if (!byResult.has(subj)) byResult.set(subj, {});
     byResult.get(subj)[key] = obj;
   }
-  return [...byResult.values()]
+  return [...byResult.entries()]
+    .filter(([subj]) => topLevel.has(subj))
+    .map(([, r]) => r)
     .filter((r) => r.sourceConstraintComponent)
-    .map((r) => `${r.sourceConstraintComponent}|${r.resultSeverity}|${r.focusNode}|${r.resultPath ?? ''}`)
+    .map((r) => `${r.sourceConstraintComponent}|${r.resultSeverity}|${anon(r.focusNode)}|${r.resultPath ?? ""}`)
     .sort();
 }
 
