@@ -52,25 +52,6 @@ pub struct DataAdapter<'a> {
 /// `GRAPH $shapesGraph { … }` finds it.
 pub const SHAPES_GRAPH_IRI: &str = "urn:x-shacl:shapes-graph";
 
-/// Prefix for the IRI a pre-bound blank node is carried into the query as.
-///
-/// A blank node written into a SPARQL *pattern* is not a constant: SPARQL
-/// gives it the meaning of a variable that cannot be selected, so substituting
-/// `$this` with one does not pin the pattern to that node, it unpins the
-/// pattern entirely. Every focus node then matches every other, and N blank
-/// node focus nodes sharing a shape report N² results instead of N.
-///
-/// Standing an IRI in its place restores the constant, and
-/// [`QueryableDataset::internalize_term`] turns it back into the very same
-/// [`TermId`] the blank node already has — so the substitution is invisible to
-/// matching, which never sees an IRI at all.
-///
-/// The reverse direction is guarded: an IRI under this prefix is only read as
-/// a blank node when a blank node with that label actually exists in the
-/// store. A data graph free to use any IRI it likes therefore keeps its own
-/// meaning for one that merely looks like this.
-const BNODE_IRI_PREFIX: &str = "urn:x-shacl:bnode:";
-
 impl<'a> DataAdapter<'a> {
     pub fn new(graph: &'a Graph, store: &'a TermStore) -> Self {
         Self {
@@ -192,19 +173,14 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
     }
 
     fn internalize_term(&self, term: Term) -> std::result::Result<TermId, Infallible> {
-        // A pre-bound blank node arrives as its stand-in IRI; resolve it back
-        // to the node itself so matching compares the same id the graph holds.
-        //
-        // Every step is checked rather than assumed — it must decode, name a
-        // term the store actually has, and name a blank node — so an IRI in
-        // the data that merely looks like this keeps its own meaning.
-        if let Term::NamedNode(n) = &term
-            && let Some(raw) = n.as_str().strip_prefix(BNODE_IRI_PREFIX)
-            && let Ok(raw) = raw.parse::<u32>()
-            && (raw as usize) < self.store.len()
-            && self.store.is_blank(TermId::from_raw(raw))
+        // A blank node the store rendered — a pre-bound focus node, or one
+        // handed back in a solution — resolves to the handle it already has.
+        // `get_term` cannot do this: it refuses blank nodes because an
+        // externally-supplied label names nothing here, which stays true.
+        if let Term::BlankNode(b) = &term
+            && let Some(id) = self.store.blank_node_from_output_label(b.as_str())
         {
-            return Ok(TermId::from_raw(raw));
+            return Ok(id);
         }
         Ok(self
             .store
@@ -317,6 +293,102 @@ fn unsupported_in(p: &spargebra::algebra::GraphPattern, prebound: &[&str]) -> Op
     }
 }
 
+/// Pre-bound variables and the terms they stand for.
+type Binding<'a> = Vec<(&'a str, Term)>;
+
+/// Whether `name` appears anywhere the substitution would reach.
+///
+/// Runs the same fold with a probe that rewrites nothing, so the answer cannot
+/// drift from the positions [`substitute`] actually visits — including the
+/// projection, where a variable can appear and nowhere else.
+fn mentions(query: &Query, name: &str) -> bool {
+    let seen = std::cell::Cell::new(false);
+    let probe = |v: &Variable| -> Option<Term> {
+        if v.as_str() == name {
+            seen.set(true);
+        }
+        None
+    };
+    match query {
+        Query::Select { pattern, .. } | Query::Ask { pattern, .. } => {
+            fold_pattern(pattern, &probe);
+        }
+        _ => {}
+    }
+    seen.get()
+}
+
+/// Adds `names` to a `SELECT`'s projection if they are not already there.
+///
+/// The evaluator will only substitute a variable that its projection produces,
+/// so a blank node bound to `$currentShape` — which most constraints never
+/// project, and many never mention outside a `GRAPH` block — is rejected
+/// outright without this. An `ASK` needs no such help: it collects variables
+/// from the whole pattern, having no projection to collect them from.
+///
+/// Only the outermost projection is touched. A subquery's is a separate scope,
+/// and widening it would change which of its bindings escape.
+fn ensure_projected(query: &Query, names: &[&str]) -> Query {
+    use spargebra::algebra::GraphPattern as G;
+
+    fn widen(
+        p: &spargebra::algebra::GraphPattern,
+        names: &[&str],
+    ) -> spargebra::algebra::GraphPattern {
+        match p {
+            G::Project { inner, variables } => {
+                let mut variables = variables.clone();
+                for name in names {
+                    let v = Variable::new_unchecked(*name);
+                    if !variables.contains(&v) {
+                        variables.push(v);
+                    }
+                }
+                G::Project {
+                    inner: inner.clone(),
+                    variables,
+                }
+            }
+            // The wrappers a projection can sit under. Descend through them and
+            // nothing else: past here the tree is the query body, where a
+            // `Project` would belong to a subquery.
+            G::Distinct { inner } => G::Distinct {
+                inner: Box::new(widen(inner, names)),
+            },
+            G::Reduced { inner } => G::Reduced {
+                inner: Box::new(widen(inner, names)),
+            },
+            G::OrderBy { inner, expression } => G::OrderBy {
+                inner: Box::new(widen(inner, names)),
+                expression: expression.clone(),
+            },
+            G::Slice {
+                inner,
+                start,
+                length,
+            } => G::Slice {
+                inner: Box::new(widen(inner, names)),
+                start: *start,
+                length: *length,
+            },
+            other => other.clone(),
+        }
+    }
+
+    match query {
+        Query::Select {
+            dataset,
+            pattern,
+            base_iri,
+        } => Query::Select {
+            dataset: dataset.clone(),
+            pattern: widen(pattern, names),
+            base_iri: base_iri.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Substitutes pre-bound variables into the query algebra.
 ///
 /// Doing this here rather than handing the bindings to the evaluator matters
@@ -370,17 +442,12 @@ fn fold_term_pattern(
     match t {
         T::Variable(v) => match pre(v) {
             Some(Term::NamedNode(n)) => T::NamedNode(n),
-            // Never `T::BlankNode(b)`: that is a variable in a pattern, not a
-            // constant, and would match every node rather than this one.
-            // [`to_term`] already converts blank nodes to their stand-in IRI,
-            // so this arm is only reached by a caller building bindings by
-            // hand — and it deliberately produces an IRI that resolves to
-            // nothing, since a constraint that matches nothing is a visible
-            // failure and one that matches everything is not.
-            Some(Term::BlankNode(b)) => T::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
-                "{BNODE_IRI_PREFIX}{}",
-                b.as_str()
-            ))),
+            // Never `T::BlankNode(b)`: SPARQL reads a blank node in a pattern
+            // as a variable that cannot be selected, so it would match every
+            // node instead of this one. `run_in` routes blank nodes to the
+            // evaluator's own substitution and never sends one here; leaving
+            // the variable in place is the safe reading of a caller that does.
+            Some(Term::BlankNode(_)) => t.clone(),
             Some(Term::Literal(l)) => T::Literal(l),
             _ => t.clone(),
         },
@@ -598,9 +665,37 @@ pub fn run_in(
         Some(s) => DataAdapter::new(graph, store).with_shapes(s),
         None => DataAdapter::new(graph, store),
     };
+    // Blank nodes take the evaluator's own substitution rather than the
+    // algebra rewrite; everything else takes the rewrite. See [`substitute`].
+    let (blank, ground): (Binding, Binding) = bindings
+        .iter()
+        .cloned()
+        .partition(|(_, t)| matches!(t, Term::BlankNode(_)));
+
     let evaluator = QueryEvaluator::new();
-    let substituted = substitute(query, bindings);
-    let prepared = evaluator.prepare(&substituted);
+    let substituted = substitute(query, &ground);
+
+    // A variable the query never mentions cannot be substituted — the
+    // evaluator rejects it rather than ignoring it — and binding it would mean
+    // nothing anyway. `$currentShape` is the ordinary case: most constraints
+    // do not refer to it.
+    let wanted: Vec<&str> = blank
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| mentions(&substituted, name))
+        .collect();
+    let substituted = ensure_projected(&substituted, &wanted);
+
+    let prepared = wanted
+        .iter()
+        .fold(evaluator.prepare(&substituted), |q, name| {
+            let term = blank
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, t)| t.clone())
+                .expect("wanted is drawn from blank");
+            q.substitute_variable(Variable::new_unchecked(*name), term)
+        });
 
     match prepared
         .execute(&adapter)
@@ -642,15 +737,11 @@ pub fn is_ask(query: &Query) -> bool {
 
 /// Converts an interned term to `oxrdf` for pre-binding.
 ///
-/// A blank node becomes its stand-in IRI rather than itself, because a blank
-/// node substituted into a pattern is a variable and would match everything —
-/// see [`BNODE_IRI_PREFIX`]. The id is carried rather than the label: the
-/// store scope-prefixes labels on the way in and so cannot look one up again,
-/// and the id names the node exactly.
+/// A blank node goes in as itself. It must not reach the algebra rewrite —
+/// see [`substitute`] — but the evaluator's own substitution takes it
+/// faithfully, and [`QueryableDataset::internalize_term`] resolves it back to
+/// the handle it already has.
 pub fn to_term(t: TermId, store: &TermStore) -> Term {
-    if store.is_blank(t) {
-        return oxrdf::NamedNode::new_unchecked(format!("{BNODE_IRI_PREFIX}{}", t.as_raw())).into();
-    }
     store.to_oxrdf(t)
 }
 
@@ -664,20 +755,9 @@ pub fn to_term(t: TermId, store: &TermStore) -> Term {
 /// quietly absent.
 pub fn from_term(term: TermRef<'_>, store: &TermStore) -> Option<TermId> {
     match term {
-        TermRef::NamedNode(n) => {
-            if let Some(raw) = n.as_str().strip_prefix(BNODE_IRI_PREFIX)
-                && let Ok(raw) = raw.parse::<u32>()
-                && (raw as usize) < store.len()
-                && store.is_blank(TermId::from_raw(raw))
-            {
-                return Some(TermId::from_raw(raw));
-            }
-            store.get_term(term)
-        }
-        // The evaluator resolves the stand-in against the graph and hands the
-        // node itself back, so a solution can carry a real blank node however
-        // it was pre-bound. Without this it resolves to nothing and the
-        // result loses its `sh:value` without saying so.
+        // A solution can carry a blank node — as the focus node it was bound
+        // to, or as a value read from the graph. Without this it resolves to
+        // nothing and the result loses its `sh:value` without saying so.
         TermRef::BlankNode(b) => store.blank_node_from_output_label(b.as_str()),
         _ => store.get_term(term),
     }

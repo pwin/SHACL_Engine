@@ -160,14 +160,16 @@ fn sixty_blank_focus_nodes_give_sixty_results() {
     assert_eq!(fixture(&blank_data(60), SHAPES), 60);
 }
 
-/// The stand-in IRI must not escape into the report.
+/// A blank node handed back as the offending value reaches the report as
+/// itself.
 ///
-/// It exists only to survive the trip through the SPARQL algebra. A constraint
-/// that hands `$this` back as the offending value — `BIND($this AS ?value)` —
-/// is the case that would expose it, and `sh:value` has to name the blank node
-/// the data actually holds, not the engine's internal spelling of it.
+/// `BIND($this AS ?value)` is the case that exposes however the engine carries
+/// a pre-bound blank node internally: `sh:value` has to name the node the data
+/// holds. It was silently absent before — `from_term` could not resolve a
+/// blank node — and a release later it was briefly an engine-internal IRI.
+/// Both were invisible without asking for the value back.
 #[test]
-fn the_stand_in_iri_never_reaches_a_result() {
+fn a_blank_node_value_reaches_the_report_as_itself() {
     let shapes = r#"
 @prefix ex: <http://example.org/ns#> .
 @prefix sh: <http://www.w3.org/ns/shacl#> .
@@ -218,4 +220,109 @@ ex:S a sh:NodeShape ;
     // And `sh:value` is present and is a blank node — not merely absent,
     // which is how this looked before the round trip closed.
     assert!(rendered.contains("shacl#value> _:"), "{rendered}");
+}
+
+/// `FILTER(isIRI($this))` must still exclude a blank node focus node.
+///
+/// This is how a shape says "only named classes" — anonymous class and
+/// property expressions (`owl:unionOf`, `owl:intersectionOf`, the object of
+/// `owl:inverseOf`) are blank nodes, and real ontologies carry them in bulk.
+/// Reporting on them is a false positive on valid input.
+#[test]
+fn is_iri_still_excludes_a_blank_node_focus() {
+    let shapes = r#"
+@prefix ex: <http://example.org/ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+ex:S a sh:NodeShape ;
+    sh:targetSubjectsOf <http://www.w3.org/2000/01/rdf-schema#label> ;
+    sh:sparql [
+        sh:message "named only" ;
+        sh:select """SELECT $this ?value WHERE {
+            $this <http://example.org/ns#p> ?value .
+            FILTER(isIRI($this))
+        }"""
+    ] .
+"#;
+    // Three blank and two named focus nodes; only the named two qualify.
+    let mut data = blank_data(3);
+    data.push_str(&named_data(2).replace("@prefix ex: <http://example.org/ns#> .\n", ""));
+    assert_eq!(
+        fixture(&data, shapes),
+        2,
+        "isIRI($this) let blank nodes through"
+    );
+}
+
+/// The other half: a blank node focus node must report as a blank node.
+#[test]
+fn is_blank_recognises_a_blank_node_focus() {
+    let shapes = r#"
+@prefix ex: <http://example.org/ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+ex:S a sh:NodeShape ;
+    sh:targetSubjectsOf <http://www.w3.org/2000/01/rdf-schema#label> ;
+    sh:sparql [
+        sh:message "anonymous only" ;
+        sh:select """SELECT $this ?value WHERE {
+            $this <http://example.org/ns#p> ?value .
+            FILTER(isBlank($this))
+        }"""
+    ] .
+"#;
+    let mut data = blank_data(3);
+    data.push_str(&named_data(2).replace("@prefix ex: <http://example.org/ns#> .\n", ""));
+    assert_eq!(
+        fixture(&data, shapes),
+        3,
+        "isBlank($this) did not see the blank nodes"
+    );
+}
+
+/// SPARQL's term inspection must tell the truth about a pre-bound blank node.
+///
+/// This is the property the N² fix originally broke: carrying a blank node
+/// into the query as an IRI made it a constant — which fixed the cross-join —
+/// but `isIRI($this)` then answered true, and shapes that use exactly that to
+/// exclude anonymous class expressions started reporting on them. A count is
+/// not enough to catch it, so each predicate is pinned on both populations.
+#[test]
+fn term_inspection_tells_the_truth_about_a_blank_focus() {
+    let shape = |filter: &str| {
+        format!(
+            r#"
+@prefix ex: <http://example.org/ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+ex:S a sh:NodeShape ;
+    sh:targetSubjectsOf <http://www.w3.org/2000/01/rdf-schema#label> ;
+    sh:sparql [
+        sh:message "m" ;
+        sh:select """SELECT $this ?value WHERE {{
+            $this <http://example.org/ns#p> ?value .
+            FILTER({filter})
+        }}"""
+    ] .
+"#
+        )
+    };
+
+    let mut data = blank_data(3);
+    data.push_str(&named_data(2).replace("@prefix ex: <http://example.org/ns#> .\n", ""));
+
+    // 3 blank, 2 named.
+    for (filter, expected) in [
+        ("isIRI($this)", 2),
+        ("isBlank($this)", 3),
+        ("isLiteral($this)", 0),
+        ("!isBlank($this)", 2),
+        ("sameTerm($this, $this)", 5),
+        // Pre-binding means the variable *is* bound, whichever kind of term it
+        // holds — this is why substitution cannot be textual.
+        ("bound($this)", 5),
+    ] {
+        assert_eq!(
+            fixture(&data, &shape(filter)),
+            expected,
+            "FILTER({filter}) gave the wrong population"
+        );
+    }
 }
