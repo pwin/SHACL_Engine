@@ -52,6 +52,25 @@ pub struct DataAdapter<'a> {
 /// `GRAPH $shapesGraph { … }` finds it.
 pub const SHAPES_GRAPH_IRI: &str = "urn:x-shacl:shapes-graph";
 
+/// Prefix for the IRI a pre-bound blank node is carried into the query as.
+///
+/// A blank node written into a SPARQL *pattern* is not a constant: SPARQL
+/// gives it the meaning of a variable that cannot be selected, so substituting
+/// `$this` with one does not pin the pattern to that node, it unpins the
+/// pattern entirely. Every focus node then matches every other, and N blank
+/// node focus nodes sharing a shape report N² results instead of N.
+///
+/// Standing an IRI in its place restores the constant, and
+/// [`QueryableDataset::internalize_term`] turns it back into the very same
+/// [`TermId`] the blank node already has — so the substitution is invisible to
+/// matching, which never sees an IRI at all.
+///
+/// The reverse direction is guarded: an IRI under this prefix is only read as
+/// a blank node when a blank node with that label actually exists in the
+/// store. A data graph free to use any IRI it likes therefore keeps its own
+/// meaning for one that merely looks like this.
+const BNODE_IRI_PREFIX: &str = "urn:x-shacl:bnode:";
+
 impl<'a> DataAdapter<'a> {
     pub fn new(graph: &'a Graph, store: &'a TermStore) -> Self {
         Self {
@@ -173,6 +192,20 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
     }
 
     fn internalize_term(&self, term: Term) -> std::result::Result<TermId, Infallible> {
+        // A pre-bound blank node arrives as its stand-in IRI; resolve it back
+        // to the node itself so matching compares the same id the graph holds.
+        //
+        // Every step is checked rather than assumed — it must decode, name a
+        // term the store actually has, and name a blank node — so an IRI in
+        // the data that merely looks like this keeps its own meaning.
+        if let Term::NamedNode(n) = &term
+            && let Some(raw) = n.as_str().strip_prefix(BNODE_IRI_PREFIX)
+            && let Ok(raw) = raw.parse::<u32>()
+            && (raw as usize) < self.store.len()
+            && self.store.is_blank(TermId::from_raw(raw))
+        {
+            return Ok(TermId::from_raw(raw));
+        }
         Ok(self
             .store
             .get_term(term.as_ref())
@@ -337,7 +370,17 @@ fn fold_term_pattern(
     match t {
         T::Variable(v) => match pre(v) {
             Some(Term::NamedNode(n)) => T::NamedNode(n),
-            Some(Term::BlankNode(b)) => T::BlankNode(b),
+            // Never `T::BlankNode(b)`: that is a variable in a pattern, not a
+            // constant, and would match every node rather than this one.
+            // [`to_term`] already converts blank nodes to their stand-in IRI,
+            // so this arm is only reached by a caller building bindings by
+            // hand — and it deliberately produces an IRI that resolves to
+            // nothing, since a constraint that matches nothing is a visible
+            // failure and one that matches everything is not.
+            Some(Term::BlankNode(b)) => T::NamedNode(oxrdf::NamedNode::new_unchecked(format!(
+                "{BNODE_IRI_PREFIX}{}",
+                b.as_str()
+            ))),
             Some(Term::Literal(l)) => T::Literal(l),
             _ => t.clone(),
         },
@@ -598,13 +641,46 @@ pub fn is_ask(query: &Query) -> bool {
 }
 
 /// Converts an interned term to `oxrdf` for pre-binding.
+///
+/// A blank node becomes its stand-in IRI rather than itself, because a blank
+/// node substituted into a pattern is a variable and would match everything —
+/// see [`BNODE_IRI_PREFIX`]. The id is carried rather than the label: the
+/// store scope-prefixes labels on the way in and so cannot look one up again,
+/// and the id names the node exactly.
 pub fn to_term(t: TermId, store: &TermStore) -> Term {
+    if store.is_blank(t) {
+        return oxrdf::NamedNode::new_unchecked(format!("{BNODE_IRI_PREFIX}{}", t.as_raw())).into();
+    }
     store.to_oxrdf(t)
 }
 
 /// Resolves a term produced by SPARQL back into the store, if it is present.
+///
+/// The stand-in IRI is decoded here as well as on the way in, because a
+/// constraint can hand a pre-bound term straight back — `BIND($this AS
+/// ?value)` is the obvious way — and the report has to name the blank node the
+/// data holds rather than the spelling the engine used to carry it through the
+/// algebra. Without this the value resolves to nothing and `sh:value` is
+/// quietly absent.
 pub fn from_term(term: TermRef<'_>, store: &TermStore) -> Option<TermId> {
-    store.get_term(term)
+    match term {
+        TermRef::NamedNode(n) => {
+            if let Some(raw) = n.as_str().strip_prefix(BNODE_IRI_PREFIX)
+                && let Ok(raw) = raw.parse::<u32>()
+                && (raw as usize) < store.len()
+                && store.is_blank(TermId::from_raw(raw))
+            {
+                return Some(TermId::from_raw(raw));
+            }
+            store.get_term(term)
+        }
+        // The evaluator resolves the stand-in against the graph and hands the
+        // node itself back, so a solution can carry a real blank node however
+        // it was pre-bound. Without this it resolves to nothing and the
+        // result loses its `sh:value` without saying so.
+        TermRef::BlankNode(b) => store.blank_node_from_output_label(b.as_str()),
+        _ => store.get_term(term),
+    }
 }
 
 #[cfg(test)]

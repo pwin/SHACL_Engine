@@ -404,6 +404,30 @@ impl TermStore {
         self.lookup.get(&data).copied()
     }
 
+    /// Resolves a blank node rendered by [`TermStore::to_oxrdf`] back to its
+    /// handle, or `None` if this store never produced it.
+    ///
+    /// The inverse of the label transform below, and deliberately next to it
+    /// so the two cannot drift apart. [`TermStore::get_term`] refuses blank
+    /// nodes because an externally-supplied label names nothing here — that
+    /// stays true, and this is the narrow exception: a label this store wrote,
+    /// coming back from a round trip through the SPARQL evaluator, which
+    /// externalises terms to `oxrdf` and hands them back as solutions.
+    pub fn blank_node_from_output_label(&self, label: &str) -> Option<TermId> {
+        // The stored form is `<scope>:<label>` and the rendered one swaps that
+        // single `:` for `_`. A scope is decimal, so the first `_` is always
+        // the separator and the swap is reversible.
+        let cut = label.find('_')?;
+        let mut stored = String::with_capacity(label.len());
+        stored.push_str(&label[..cut]);
+        stored.push(':');
+        stored.push_str(&label[cut + 1..]);
+
+        let s = self.strings.get(&stored)?;
+        let id = *self.blank_of.get(s.0 as usize)?;
+        (id != Self::NONE).then_some(TermId(id))
+    }
+
     /// Materialises an interned term back into an `oxrdf` term, for report
     /// serialisation. Blank node labels keep their scope prefix stripped.
     pub fn to_oxrdf(&self, id: TermId) -> Term {
@@ -483,6 +507,48 @@ impl TermStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `to_oxrdf` and `blank_node_from_output_label` are inverses.
+    ///
+    /// They encode the same convention in two places — one swaps `:` for `_`,
+    /// the other swaps it back — so this walks every blank node in a store
+    /// with several scopes and round-trips it, rather than trusting a pair of
+    /// string edits to stay agreed.
+    #[test]
+    fn a_rendered_blank_node_resolves_to_the_node_it_came_from() {
+        let mut s = TermStore::new();
+        let mut ids = Vec::new();
+        for scope in [0u32, 1, 7, 1024] {
+            for label in ["b0", "b1", "x", "has_underscore", "b12345"] {
+                ids.push(s.blank_node(scope, label));
+            }
+        }
+        // Distinct nodes, or the round trip below could pass by collision.
+        let unique: std::collections::HashSet<_> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len());
+
+        for id in ids {
+            let Term::BlankNode(b) = s.to_oxrdf(id) else {
+                panic!("should render as a blank node");
+            };
+            assert_eq!(
+                s.blank_node_from_output_label(b.as_str()),
+                Some(id),
+                "{} did not round-trip",
+                b.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_label_this_store_never_wrote_resolves_to_nothing() {
+        let mut s = TermStore::new();
+        s.blank_node(0, "b0");
+        // No separator, and a scope that exists but a label that does not.
+        assert_eq!(s.blank_node_from_output_label("b0"), None);
+        assert_eq!(s.blank_node_from_output_label("0_nope"), None);
+        assert_eq!(s.blank_node_from_output_label("9_b0"), None);
+    }
 
     #[test]
     fn same_term_interns_once() {
