@@ -1,0 +1,58 @@
+[package]
+name = "shacl-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebAssembly bindings for the shacl validation engine"
+
+[lib]
+# `cdylib` is what wasm-bindgen turns into the .wasm module; `rlib` keeps the
+# crate buildable as a normal library, which is what lets `cargo build
+# --workspace` and `cargo test --workspace` cover it on a native target too.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# `default-features = false` drops `parallel` (rayon), which cannot build for
+# wasm32 -- there are no threads to split the Turtle parse across. See the
+# `parallel` feature's note in ../shacl/Cargo.toml.
+engine = { package = "shacl", path = "../shacl", default-features = false }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+# Routes a Rust panic to console.error with its message and stack. Without it a
+# panic surfaces in JS only as `RuntimeError: unreachable`, which says nothing
+# about what actually failed.
+console_error_panic_hook = "0.1"
+
+# oxrdf mints blank node identifiers via `rand`, which reaches getrandom.
+# getrandom 0.3 has no default source on wasm32-unknown-unknown and needs both
+# this feature *and* the `getrandom_backend="wasm_js"` cfg -- set for this
+# target in the workspace `.cargo/config.toml`, since a feature alone is not
+# enough (getrandom's own compile_error! says so explicitly).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# SPARQL's NOW() reaches oxsdatatypes' clock, which is `std::time::SystemTime`
+# by default -- unimplemented on wasm32-unknown-unknown, so evaluating any
+# `sh:sparql` constraint panicked with "time not implemented on this platform".
+# oxsdatatypes already provides for this: its `js` feature switches the clock to
+# `js_sys::Date::now()` for exactly this target triple. Declared here so cargo's
+# feature unification turns it on for the shared oxsdatatypes in wasm builds
+# only; native builds keep SystemTime.
+oxsdatatypes = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+# Current rustc emits bulk-memory (and sign-extension) instructions by default,
+# which the binaryen build wasm-pack downloads rejects unless told they are
+# allowed -- it fails the whole build with "Bulk memory operations require bulk
+# memory". Both proposals shipped years ago and are on by default in every
+# runtime this targets (Node 16+, all current browsers), so the right fix is to
+# enable them rather than to turn `wasm-opt` off and ship a bigger module.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ['-O', '--enable-bulk-memory', '--enable-sign-ext', '--enable-nontrapping-float-to-int']
+
+[package.metadata.wasm-pack.profile.profiling]
+wasm-opt = ['-O', '--enable-bulk-memory', '--enable-sign-ext', '--enable-nontrapping-float-to-int']

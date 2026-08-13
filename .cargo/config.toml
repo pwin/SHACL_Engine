@@ -1,0 +1,10 @@
+# getrandom 0.3 refuses to build for wasm32-unknown-unknown unless it is told
+# which backend to use, and says so with a compile_error!. The `wasm_js` feature
+# on the getrandom dependency (see crates/shacl-wasm/Cargo.toml) is necessary
+# but explicitly *not* sufficient -- this cfg is the other half. It reaches
+# getrandom through `rand`, which oxrdf uses to mint blank node identifiers.
+#
+# Scoped to wasm32-unknown-unknown, so native builds (the CLI, the Python
+# extension module, the test suite) are completely unaffected.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

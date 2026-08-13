@@ -6,6 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 description = "A high-performance SHACL validation engine"
 
+[features]
+# On by default, so a plain `cargo build`/`cargo test` and every existing
+# consumer keep the multi-threaded Turtle parse with no change.
+default = ["parallel"]
+# Splits the Turtle parse across worker threads (rayon). Turn it off for
+# targets with no threads to split across -- `wasm32-unknown-unknown` in
+# particular, where rayon cannot build at all. With it off the loader takes the
+# sequential whole-document path it already falls back to whenever a document
+# can't be chunked safely; the two produce an identical graph, which is what
+# the `parallel_matches_sequential` test pins.
+parallel = ["dep:rayon"]
+
 [dependencies]
 oxrdf.workspace = true
 oxrdfio.workspace = true
@@ -13,12 +25,13 @@ oxttl = { version = "0.2", features = ["rdf-12"] }
 oxsdatatypes.workspace = true
 spargebra.workspace = true
 spareval.workspace = true
-rayon.workspace = true
+rayon = { workspace = true, optional = true }
 hashbrown.workspace = true
 regex.workspace = true
 foldhash = "0.2"
 # `rust_backend` keeps this pure Rust: no zlib to find at link time, which
-# matters for the three-platform release builds.
+# matters for the three-platform release builds -- and is what lets this crate
+# build for wasm32 too, where there is no C zlib to link against.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 

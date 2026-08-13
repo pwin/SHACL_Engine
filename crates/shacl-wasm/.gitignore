@@ -1,0 +1,3 @@
+# wasm-pack build output -- rebuild with `node build.mjs`
+pkg-node/
+pkg-bundler/

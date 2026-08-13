@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub use oxrdfio::RdfFormat;
 use oxrdfio::RdfParser;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 use super::graph::{Graph, GraphBuilder};
@@ -216,6 +217,10 @@ pub fn parse_reader(
 /// them separately would split it. Anonymous blank nodes, from `[ ]` or from
 /// collection syntax, are confined to the statement that introduces them and so
 /// are safe.
+///
+/// Only the chunked (`parallel`) parse calls this, but the chunk-boundary tests
+/// below exercise it directly in either build, hence `test` in the gate.
+#[cfg(any(feature = "parallel", test))]
 fn turtle_chunks(text: &str, want: usize) -> Option<Vec<(usize, usize)>> {
     if want < 2 || text.len() < 1 << 20 {
         return None;
@@ -340,7 +345,29 @@ fn turtle_chunks(text: &str, want: usize) -> Option<Vec<(usize, usize)>> {
 /// for about a tenth of load against the parser's four fifths, and keeping one
 /// shared term store avoids having to merge per-thread stores and renumber
 /// every term afterwards.
+///
+/// Without the `parallel` feature there are no worker threads to split across,
+/// so this becomes the sequential whole-document parse -- the same path already
+/// taken whenever a document cannot be chunked safely. The name is kept in both
+/// builds so callers need no `cfg` of their own.
 pub fn parse_turtle_parallel(
+    text: &str,
+    base: &str,
+    scope: u32,
+    store: &mut TermStore,
+    builder: &mut GraphBuilder,
+) -> Result<()> {
+    #[cfg(not(feature = "parallel"))]
+    return parse_str(text, RdfFormat::Turtle, base, scope, store, builder);
+
+    #[cfg(feature = "parallel")]
+    parse_turtle_chunked(text, base, scope, store, builder)
+}
+
+/// The chunked parse itself, split out so a `parallel`-off build carries no
+/// chunking/re-scoping code it could never reach.
+#[cfg(feature = "parallel")]
+fn parse_turtle_chunked(
     text: &str,
     base: &str,
     scope: u32,
