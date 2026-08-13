@@ -40,7 +40,9 @@ fn people(n: usize) -> String {
         } else {
             (i % 90).to_string()
         };
-        s.push_str(&format!("ex:p{i} a ex:Person ; ex:name \"P{i}\" ; ex:age {age} .\n"));
+        s.push_str(&format!(
+            "ex:p{i} a ex:Person ; ex:name \"P{i}\" ; ex:age {age} .\n"
+        ));
     }
     s
 }
