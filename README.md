@@ -16,14 +16,28 @@ with the W3C SHACL 1.0 and 1.2 test suites.
 
 ## Performance
 
-Against pySHACL on synthetic data, best of three, with identical result counts
-at every size. See [benchmarks/](benchmarks/) for the method and the caveats.
+Against pySHACL 0.40.1 on synthetic data, best of three, with identical result
+counts at every size — the harness compares them and refuses to report a time
+if they differ. See [benchmarks/](benchmarks/) for the method and the caveats.
 
-| instances | triples | ours | pySHACL | speedup |
-| ---: | ---: | ---: | ---: | ---: |
-| 1,000 | 6,914 | 0.020s | 1.169s | 58× |
-| 10,000 | 69,027 | 0.071s | 7.018s | 99× |
-| 100,000 | 689,861 | 0.781s | 81.399s | 104× |
+| instances | triples | results | ours | pySHACL | speedup | ours: validate |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 6,914 | 88 | 0.053s | 2.099s | 40× | 0.002s |
+| 10,000 | 69,027 | 997 | 0.127s | 16.256s | 128× | 0.020s |
+| 100,000 | 689,861 | 10,179 | 1.870s | 163.143s | 87× | 0.414s |
+
+Whole-process wall times on one machine, so read the order of magnitude
+rather than the digits; the ratio is not even monotonic in the size, which is
+a fair warning about how much weight a single number here carries. The last
+column is validation alone: at 100k it is under a quarter of the total, and
+**loading dominates** — which is where to look first for a speedup, not at the
+validator.
+
+These numbers are measured, not aspirational. An earlier version of this table
+claimed 0.781s at 100k, and stayed there while a regression made validation
+quadratic in the number of focus nodes — 44 seconds at that size, for several
+releases. `tests/scaling.rs` now asserts the shape of that curve, because a
+benchmark nobody re-runs is a claim rather than a check.
 
 ## Design
 
