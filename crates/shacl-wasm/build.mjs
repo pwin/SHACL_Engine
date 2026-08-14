@@ -28,20 +28,27 @@ const LICENSES = ['LICENSE-APACHE', 'LICENSE-MIT'];
 
 // `nodejs` for require()-based consumers (the VS Code extension host, CLIs);
 // `bundler` for webpack/vite/rollup, which want ESM plus a separate .wasm.
+//
+// wasm-pack names both packages after the crate, so publishing both would be
+// the same name twice -- a collision, not two packages. They are renamed here.
+// The plain name goes to the bundler build because that is what most consumers
+// reach for; the Node build is suffixed rather than the other way round, so an
+// `npm i shacl-wasm` in a web project does the expected thing.
 const TARGETS = {
-  nodejs: 'pkg-node',
-  bundler: 'pkg-bundler',
+  nodejs: { outDir: 'pkg-node', name: 'shacl-wasm-node' },
+  bundler: { outDir: 'pkg-bundler', name: 'shacl-wasm' },
 };
 
 const requested = process.argv.slice(2);
 const targets = requested.length ? requested : Object.keys(TARGETS);
 
 for (const target of targets) {
-  const outDir = TARGETS[target];
-  if (!outDir) {
+  const spec = TARGETS[target];
+  if (!spec) {
     console.error(`unknown target ${target}: expected one of ${Object.keys(TARGETS).join(', ')}`);
     process.exit(1);
   }
+  const { outDir, name } = spec;
 
   console.log(`\n=== wasm-pack build --target ${target} --out-dir ${outDir} ===`);
   execFileSync('wasm-pack', ['build', '--target', target, '--out-dir', outDir, '--release'], {
@@ -60,7 +67,11 @@ for (const target of targets) {
   pkg.files = [...new Set([...(pkg.files ?? []), ...LICENSES])];
   pkg.repository = { type: 'git', url: `git+${REPOSITORY}.git` };
   pkg.homepage = REPOSITORY;
+  pkg.name = name;
+  // Says which build this is, since the two are otherwise identical prose and
+  // `npm i shacl-wasm` in a Node project is a mistake worth naming.
+  pkg.description = `${pkg.description} (${target === 'nodejs' ? 'CommonJS, for Node and require()' : 'ESM, for bundlers'})`;
 
   writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
-  console.log(`  patched ${outDir}/package.json: +licences, +repository`);
+  console.log(`  patched ${outDir}/package.json: name=${name}, +licences, +repository`);
 }

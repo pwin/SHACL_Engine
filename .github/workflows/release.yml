@@ -17,6 +17,10 @@ on:
         type: choice
         options: [testpypi, pypi]
         default: testpypi
+      publish_to_npm:
+        description: "Publish the WebAssembly packages to npm (run this against a tag)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -224,3 +228,59 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: ${{ inputs.pypi_repository == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+
+  # The WebAssembly packages. Deliberately not triggered by the tag, for the
+  # same reason as `pypi`: an npm version cannot be re-published, and unpublish
+  # is only allowed for 72 hours and only when nothing depends on it.
+  #
+  # Two packages come out of one crate, because wasm-pack's two targets are not
+  # interchangeable: `shacl-wasm` is ESM for bundlers, `shacl-wasm-node` is
+  # CommonJS for `require()`. They are built here rather than taken from a
+  # checked-in `pkg-*` directory, so what is published is what this commit
+  # produces.
+  npm:
+    needs: [test]
+    if: inputs.publish_to_npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Provenance: npm records a signed link from the tarball back to this
+      # workflow run and commit. Worth having for a package whose payload is a
+      # 3 MB binary nobody can read.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+      - name: Install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+
+      # A tag, for the same reason PyPI needs one: the version published comes
+      # from Cargo.toml, and only a tag ties that number to a commit anyone can
+      # find again. npm has no disposable rehearsal registry to relax this for.
+      - name: Check the ref suits a publish
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/*) echo "publishing $GITHUB_REF_NAME to npm" ;;
+            *) echo "::error::Publishing to npm needs a tag, not $GITHUB_REF_NAME"; exit 1 ;;
+          esac
+
+      - name: Build both packages
+        run: node crates/shacl-wasm/build.mjs
+
+      # `--access public` is explicit rather than relied upon: these names are
+      # unscoped and so public by default, but the flag means a later move to a
+      # scope does not silently publish a private package instead.
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in pkg-bundler pkg-node; do
+            echo "=== $dir ==="
+            (cd "crates/shacl-wasm/$dir" && npm publish --provenance --access public)
+          done
