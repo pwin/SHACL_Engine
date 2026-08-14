@@ -170,11 +170,25 @@ vocab! {
         sh_Parameter = "Parameter",
         sh_PrefixDeclaration = "PrefixDeclaration",
 
-        // SHACL-AF rules (`sh:rule`, `sh:TripleRule`, `sh:SPARQLRule`) are
-        // deliberately absent rather than pending. Their terms used to be
-        // declared here and referenced nowhere, which reads as partial support
-        // and is worse than none: a shapes graph using rules would have loaded
-        // without complaint and quietly inferred nothing.
+        // SHACL-AF node expressions. A separate vocabulary from the SHACL 1.2
+        // node expression algebra, which lives in its own `shacl-node-expr#`
+        // namespace — the two can be told apart by predicate, so both are
+        // accepted by the same evaluator.
+        sh_this = "this",
+        sh_nodes = "nodes",
+        sh_filterShape = "filterShape",
+        sh_union = "union",
+        sh_intersection = "intersection",
+
+        // SHACL-AF rules
+        sh_rule = "rule",
+        sh_TripleRule = "TripleRule",
+        sh_SPARQLRule = "SPARQLRule",
+        sh_subject = "subject",
+        sh_predicate = "predicate",
+        sh_object = "object",
+        sh_construct = "construct",
+        sh_condition = "condition",
 
         // Validation report
         sh_ValidationReport = "ValidationReport",

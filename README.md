@@ -222,11 +222,144 @@ the fix is to move the descent off the call stack.
 
 Deliberately, rather than pending:
 
-- **SHACL-AF rules** (`sh:rule`, `sh:TripleRule`, `sh:SPARQLRule`). No
-  inference is performed, so a shapes graph relying on rules to derive the
-  triples it then validates will find them absent. pySHACL supports these.
+- **SHACL functions** (`sh:SPARQLFunction`, `sh:returnType`) and the node
+  expression form that calls them. A rule using one gets an error naming the
+  expression, not silence — see [SHACL-AF rules](#shacl-af-rules).
+- **Result annotations** (`sh:resultAnnotation`), which copy extra properties
+  from a SPARQL constraint's solution onto the result.
 - **OWL-RL pre-inference.** RDFS entailment *is* available, opt-in — see below
   — but nothing beyond it. Meta-SHACL is available too, as `--meta-shacl`.
+- **SHACL 1.2 Rules** (the `RULE { } WHERE { }` language) is a different
+  design from SHACL-AF rules and is not implemented. The 1.2 rules test suite
+  is vendored under `testsuite/shacl12/tests/rules/` but is not wired into the
+  harness, so it is not counted in the conformance figure above.
+
+## SHACL-AF rules
+
+Rules infer triples before validation, so a report can depend on data that was
+derived rather than asserted. They are off by default and enabled with `-a`
+(pySHACL's spelling):
+
+```sh
+shacl -d data.ttl -s shapes.ttl --advanced
+```
+
+Everything below is exercised by `crates/shacl/tests/rules.rs`, including the
+cases that do *not* work.
+
+### Triple rules
+
+`sh:subject`, `sh:predicate` and `sh:object` are node expressions, evaluated
+per focus node. The inferred triples are their **cross product**, so a path
+expression yielding three values yields three triples.
+
+```turtle
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+    # Every Person is also an Agent.
+    sh:rule [ a sh:TripleRule ;
+        sh:subject sh:this ;
+        sh:predicate rdf:type ;
+        sh:object ex:Agent ] ;
+    # ex:contact for each ex:knows — one triple per value.
+    sh:rule [ a sh:TripleRule ;
+        sh:subject sh:this ;
+        sh:predicate ex:contact ;
+        sh:object [ sh:path ex:knows ] ] .
+```
+
+The node expressions supported here are SHACL-AF's: `sh:this`, a constant,
+`[ sh:path P ]` with an optional `sh:nodes` operand, `[ sh:filterShape S ;
+sh:nodes N ]`, `sh:union` and `sh:intersection`. Anything else — a function
+call in particular — is an error rather than an empty result.
+
+### SPARQL rules
+
+`sh:construct` takes a `CONSTRUCT` query with `$this` pre-bound to the focus
+node:
+
+```turtle
+ex:BoxShape a sh:NodeShape ;
+    sh:targetClass ex:Box ;
+    sh:rule [ a sh:SPARQLRule ; sh:construct """
+        CONSTRUCT { $this ex:area ?a }
+        WHERE { $this ex:width ?w ; ex:height ?h . BIND(?w * ?h AS ?a) }""" ] .
+```
+
+### Conditions and ordering
+
+`sh:condition` names shapes the focus node must conform to — all of them —
+before the rule fires. `sh:order` sequences execution, default 0.
+
+```turtle
+ex:S a sh:NodeShape ; sh:targetClass ex:Person ; sh:order 1 ;
+    sh:rule [ a sh:TripleRule ;
+        sh:condition ex:HasAge ;
+        sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Adult ] .
+```
+
+## Where rule authors have to be careful
+
+These are the five things that produce a wrong answer rather than an error.
+
+**A rule fires on its shape's targets, so a shape without one does nothing.**
+This is the most common mistake, because attaching a rule to a nested property
+shape reads naturally and never runs:
+
+```turtle
+ex:S a sh:NodeShape ; sh:targetClass ex:Person ;
+    sh:property [ sh:path ex:name ;
+        sh:rule [ … ] ] .        # never fires: this shape has no target
+```
+
+**One pass, so a transitive rule does not close.** The specification defines a
+single iteration and declines to say what repeating it means. A rule deriving
+`ex:sub` from two hops of `ex:sub` reaches two hops and stops:
+
+```sh
+shacl -d data.ttl -s shapes.ttl -a                    # one pass
+shacl -d data.ttl -s shapes.ttl -a --iterate-rules 10 # to a fixpoint, max 10 rounds
+```
+
+`--iterate-rules` is outside the spec. A rule set that never settles — one
+minting a new term each round — stops with an error rather than running until
+memory does.
+
+**Rules at the same `sh:order` cannot see each other's inferences.** Two rules
+both at the default order 0 each see the graph as it was before either ran, so
+one cannot consume what the other produces. Give the consumer a higher
+`sh:order`.
+
+**Negation is not monotonic, and iteration exposes it.** Negation as failure is
+available two ways — `sh:condition [ sh:not S ]` and SPARQL's `FILTER NOT
+EXISTS` — and both are fine in a single pass. Under `--iterate-rules` a
+conclusion drawn from absence *outlives* the absence, because rules only ever
+add triples:
+
+```turtle
+# Round 1 marks ex:a as Unnamed. Round 2's rule then gives it a name.
+# The mark stays. It is simply no longer true.
+ex:Mark a sh:NodeShape ; sh:targetClass ex:Person ; sh:order 1 ;
+    sh:rule [ a sh:TripleRule ;
+        sh:condition [ sh:not ex:HasName ] ;
+        sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Unnamed ] .
+ex:Fill a sh:NodeShape ; sh:targetClass ex:Person ; sh:order 2 ;
+    sh:rule [ a sh:TripleRule ;
+        sh:subject sh:this ; sh:predicate ex:name ; sh:object "given" ] .
+```
+
+SHACL 1.2 Rules answers this by requiring a stratified rule set. SHACL-AF has
+no such requirement, so the responsibility is the author's: if a rule tests for
+absence, either keep to a single pass or make sure nothing later supplies what
+it tested for.
+
+**Inference changes what `sh:closed` means.** A closed shape starts seeing
+derived predicates and starts failing on them, exactly as it does under
+`--inference rdfs`. This is why rules are opt-in rather than automatic.
+
+One thing that is *not* a hazard: rules never modify the graph you passed in.
+The expanded graph is a new one, so a report is always relative to an input you
+still have.
 
 ### RDFS inference
 

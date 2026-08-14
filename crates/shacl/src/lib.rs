@@ -16,6 +16,7 @@ pub mod model;
 pub mod nodeexpr;
 pub mod path;
 pub mod report;
+pub mod rules;
 pub mod shapes;
 pub mod sparql;
 pub mod validate;

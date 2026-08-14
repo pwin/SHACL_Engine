@@ -100,6 +100,13 @@ fn eval_at(
     }
     let g = ctx.exprs;
     let s = ctx.shnex;
+    let v = ctx.vocab;
+
+    // SHACL-AF's focus node expression. Checked before the constant rule
+    // below, because `sh:this` is an IRI and would otherwise stand for itself.
+    if node == v.sh_this {
+        return Ok(focus.into_iter().collect());
+    }
 
     // Anything that is not a blank node carrying an operator is a constant
     // standing for itself.
@@ -466,6 +473,88 @@ fn eval_at(
         for item in items {
             out.extend(sub!(item, focus));
         }
+        return Ok(out);
+    }
+
+    // ---------------------------------------------- SHACL-AF node expressions
+    //
+    // A smaller algebra than the SHACL 1.2 one above, in the `sh:` namespace
+    // rather than `shnex:`, and used by SHACL-AF rules. Handled here rather
+    // than in a separate evaluator so a rule can nest either flavour.
+
+    /// The operand of an AF expression: `sh:nodes`, defaulting to the focus.
+    macro_rules! af_nodes {
+        ($required:expr) => {
+            match g.object(node, v.sh_nodes) {
+                Some(n) => sub!(n, focus),
+                None if $required => {
+                    return Err(Error::Shape(
+                        "sh:filterShape node expression needs sh:nodes".into(),
+                    ));
+                }
+                None => focus.into_iter().collect::<Vec<_>>(),
+            }
+        };
+    }
+
+    // Path expression: the values of `sh:path` reached from `sh:nodes`.
+    if let Some(path_node) = g.object(node, v.sh_path) {
+        let starts = af_nodes!(false);
+        let path = Path::compile(path_node, g, store, v)?;
+        let mut out = Vec::new();
+        for start in starts {
+            path.eval(start, ctx.data, &mut out);
+        }
+        out.sort_unstable();
+        out.dedup();
+        return Ok(out);
+    }
+
+    // Filter shape: those of `sh:nodes` that conform to `sh:filterShape`.
+    if let Some(shape_node) = g.object(node, v.sh_filterShape) {
+        let candidates = af_nodes!(true);
+        let Some(shapes) = ctx.shapes else {
+            // No compiled shapes to test against, so every node is vacuously
+            // conforming — the same reading the rest of this module takes.
+            return Ok(candidates);
+        };
+        let mut out = Vec::new();
+        for n in candidates {
+            if crate::validate::node_conforms(n, shape_node, ctx.data, shapes, store, v)? {
+                out.push(n);
+            }
+        }
+        return Ok(out);
+    }
+
+    // Union and intersection over a list of expressions.
+    if let Some(list) = g.object(node, v.sh_union)
+        && let Some(items) = g.list(list, v)
+    {
+        let mut out = Vec::new();
+        for item in items {
+            out.extend(sub!(item, focus));
+        }
+        out.sort_unstable();
+        out.dedup();
+        return Ok(out);
+    }
+    if let Some(list) = g.object(node, v.sh_intersection)
+        && let Some(items) = g.list(list, v)
+    {
+        let mut sets = items
+            .into_iter()
+            .map(|item| eval_at(item, focus, ctx, store, depth + 1));
+        let Some(first) = sets.next() else {
+            return Ok(Vec::new());
+        };
+        let mut out = first?;
+        for rest in sets {
+            let rest = rest?;
+            out.retain(|n| rest.contains(n));
+        }
+        out.sort_unstable();
+        out.dedup();
         return Ok(out);
     }
 

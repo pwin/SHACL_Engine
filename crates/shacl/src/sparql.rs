@@ -251,7 +251,9 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
 /// would be a guess.
 fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
     let pattern = match query {
-        Query::Select { pattern, .. } | Query::Ask { pattern, .. } => pattern,
+        Query::Select { pattern, .. }
+        | Query::Ask { pattern, .. }
+        | Query::Construct { pattern, .. } => pattern,
         _ => return Ok(()),
     };
     let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
@@ -310,7 +312,9 @@ fn mentions(query: &Query, name: &str) -> bool {
         None
     };
     match query {
-        Query::Select { pattern, .. } | Query::Ask { pattern, .. } => {
+        Query::Select { pattern, .. }
+        | Query::Ask { pattern, .. }
+        | Query::Construct { pattern, .. } => {
             fold_pattern(pattern, &probe);
         }
         _ => {}
@@ -425,6 +429,31 @@ fn substitute(query: &Query, bindings: &[(&str, Term)]) -> Query {
             pattern,
             base_iri,
         } => Query::Ask {
+            dataset: dataset.clone(),
+            pattern: fold_pattern(pattern, &lookup),
+            base_iri: base_iri.clone(),
+        },
+        // A SHACL-AF `sh:SPARQLRule` is a CONSTRUCT, and `$this` appears in
+        // both halves of it: the template says what to infer, the body says
+        // when. Substituting only the body would leave `?this` in the template
+        // unbound; substituting neither — which this did before rules existed
+        // — turns the whole query into "for every node", which quietly gives
+        // the right answer whenever the data happens to hold exactly one
+        // match, and the wrong one as soon as it holds two.
+        Query::Construct {
+            template,
+            dataset,
+            pattern,
+            base_iri,
+        } => Query::Construct {
+            template: template
+                .iter()
+                .map(|t| spargebra::term::TriplePattern {
+                    subject: fold_term_pattern(&t.subject, &lookup),
+                    predicate: fold_named_node_pattern(&t.predicate, &lookup),
+                    object: fold_term_pattern(&t.object, &lookup),
+                })
+                .collect(),
             dataset: dataset.clone(),
             pattern: fold_pattern(pattern, &lookup),
             base_iri: base_iri.clone(),
@@ -659,12 +688,45 @@ pub fn run_in(
     store: &TermStore,
     shapes: Option<&Graph>,
 ) -> Result<Vec<HashMap<String, Term>>> {
-    reject_unsupported(query, bindings)?;
-
     let adapter = match shapes {
         Some(s) => DataAdapter::new(graph, store).with_shapes(s),
         None => DataAdapter::new(graph, store),
     };
+    match evaluate(query, bindings, &adapter)? {
+        QueryResults::Solutions(solutions) => {
+            let mut out = Vec::new();
+            for solution in solutions {
+                let solution = solution.map_err(|e| Error::Sparql(format!("{e}")))?;
+                let mut row = HashMap::new();
+                for (var, term) in solution.iter() {
+                    row.insert(var.as_str().to_string(), term.clone());
+                }
+                out.push(row);
+            }
+            Ok(out)
+        }
+        QueryResults::Boolean(b) => {
+            // An ASK answering true yields one empty solution, false none, so
+            // callers can treat both query forms uniformly.
+            Ok(if b { vec![HashMap::new()] } else { Vec::new() })
+        }
+        QueryResults::Graph(_) => Err(Error::Sparql(
+            "CONSTRUCT is not valid for a SPARQL constraint".into(),
+        )),
+    }
+}
+
+/// Prepares and runs `query` against `adapter`, applying SHACL pre-binding.
+///
+/// The adapter is the caller's because the results borrow it: a solution
+/// iterator reads the dataset lazily, so the dataset has to outlive it.
+fn evaluate<'a>(
+    query: &Query,
+    bindings: &[(&str, Term)],
+    adapter: &'a DataAdapter<'a>,
+) -> Result<QueryResults<'a>> {
+    reject_unsupported(query, bindings)?;
+
     // Blank nodes take the evaluator's own substitution rather than the
     // algebra rewrite; everything else takes the rewrite. See [`substitute`].
     let (blank, ground): (Binding, Binding) = bindings
@@ -697,30 +759,60 @@ pub fn run_in(
             q.substitute_variable(Variable::new_unchecked(*name), term)
         });
 
-    match prepared
-        .execute(&adapter)
-        .map_err(|e| Error::Sparql(format!("{e}")))?
-    {
-        QueryResults::Solutions(solutions) => {
-            let mut out = Vec::new();
-            for solution in solutions {
-                let solution = solution.map_err(|e| Error::Sparql(format!("{e}")))?;
-                let mut row = HashMap::new();
-                for (var, term) in solution.iter() {
-                    row.insert(var.as_str().to_string(), term.clone());
-                }
-                out.push(row);
-            }
-            Ok(out)
-        }
-        QueryResults::Boolean(b) => {
-            // An ASK answering true yields one empty solution, false none, so
-            // callers can treat both query forms uniformly.
-            Ok(if b { vec![HashMap::new()] } else { Vec::new() })
-        }
-        QueryResults::Graph(_) => Err(Error::Sparql(
-            "CONSTRUCT is not valid for a SPARQL constraint".into(),
+    prepared
+        .execute(adapter)
+        .map_err(|e| Error::Sparql(format!("{e}")))
+}
+
+/// Runs a `CONSTRUCT` query, returning the triples it builds.
+///
+/// This is what a SHACL-AF `sh:SPARQLRule` is: the constructed triples are the
+/// inference. Pre-binding works exactly as it does for a constraint, so a rule
+/// body can use `$this` and mean the focus node.
+pub fn run_construct(
+    query: &Query,
+    bindings: &[(&str, Term)],
+    graph: &Graph,
+    store: &TermStore,
+) -> Result<Vec<oxrdf::Triple>> {
+    let adapter = DataAdapter::new(graph, store);
+    match evaluate(query, bindings, &adapter)? {
+        QueryResults::Graph(triples) => triples
+            .map(|t| t.map_err(|e| Error::Sparql(format!("{e}"))))
+            .collect(),
+        _ => Err(Error::Sparql(
+            "sh:construct must be a CONSTRUCT query, not SELECT or ASK".into(),
         )),
+    }
+}
+
+impl SparqlConstraint {
+    /// Compiles the `sh:construct` query of a SHACL-AF SPARQL rule.
+    ///
+    /// Parsed here rather than at inference time so a malformed query is a
+    /// shapes-graph error, reported once, instead of a failure that only
+    /// appears when the rule happens to fire.
+    pub fn compile_construct(
+        text: &str,
+        node: TermId,
+        shapes: &Graph,
+        store: &TermStore,
+        vocab: &Vocab,
+    ) -> Result<Self> {
+        let header = prefix_header(node, shapes, store, vocab);
+        let query = parse_query(&header, text)?;
+        if !matches!(query, Query::Construct { .. }) {
+            return Err(Error::Shape(
+                "sh:construct must be a CONSTRUCT query".into(),
+            ));
+        }
+        Ok(Self {
+            query,
+            is_ask: false,
+            source: node,
+            message: Vec::new(),
+            severity: None,
+        })
     }
 }
 

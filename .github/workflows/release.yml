@@ -244,9 +244,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Provenance: npm records a signed link from the tarball back to this
-      # workflow run and commit. Worth having for a package whose payload is a
-      # 3 MB binary nobody can read.
+      # Both halves of authentication depend on this. npm exchanges the OIDC
+      # token minted here for publish rights, and records a signed link from
+      # each tarball back to this workflow run and commit — worth having for a
+      # package whose payload is a 3 MB binary nobody can read.
       id-token: write
     steps:
       - uses: actions/checkout@v7
@@ -257,6 +258,14 @@ jobs:
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
+      # Trusted publishing landed in npm 11.5.1, and Node 20 ships npm 10. The
+      # older client has no idea OIDC exists: it looks for a token, finds none,
+      # and fails with ENEEDAUTH rather than anything mentioning OIDC. Upgrading
+      # the client is what makes the exchange possible at all.
+      - name: Use an npm that can do trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
       - name: Install wasm-pack
         run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
@@ -273,14 +282,21 @@ jobs:
       - name: Build both packages
         run: node crates/shacl-wasm/build.mjs
 
+      # No token. npm is configured to trust this repository and workflow, and
+      # the client exchanges a short-lived OIDC token for publish rights — the
+      # same arrangement as `pypi` above, and the reason neither index needs a
+      # long-lived credential stored here.
+      #
+      # It also settles the two-factor problem rather than working around it.
+      # An automation token publishes by being exempt from 2FA; this publishes
+      # without a credential that could be stolen in the first place.
+      #
       # `--access public` is explicit rather than relied upon: these names are
       # unscoped and so public by default, but the flag means a later move to a
       # scope does not silently publish a private package instead.
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in pkg-bundler pkg-node; do
             echo "=== $dir ==="
-            (cd "crates/shacl-wasm/$dir" && npm publish --provenance --access public)
+            (cd "crates/shacl-wasm/$dir" && npm publish --access public)
           done

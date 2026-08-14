@@ -256,6 +256,46 @@ pub struct Shape {
     pub severity: TermId,
     pub messages: Vec<TermId>,
     pub deactivated: bool,
+    /// SHACL-AF rules attached with `sh:rule`. Empty for almost every shape,
+    /// and never consulted unless rules are asked for.
+    pub rules: Vec<Rule>,
+    /// `sh:order`, which SHACL core defines for presentation and SHACL-AF
+    /// reuses to sequence rule execution. Absent means 0.
+    pub order: f64,
+}
+
+/// A SHACL-AF rule: something that infers triples rather than reporting on
+/// them.
+///
+/// Rules are the one part of SHACL that *changes* the data graph, so they are
+/// kept firmly out of the validation path: nothing here runs unless a caller
+/// asks for it, and what it produces is a new graph rather than a mutation of
+/// the one it was given.
+#[derive(Debug, Clone)]
+pub struct Rule {
+    /// The rule's node, for error messages.
+    pub node: TermId,
+    pub kind: RuleKind,
+    /// `sh:condition`: shapes the focus node must conform to before the rule
+    /// fires. All of them, not any.
+    pub conditions: Vec<TermId>,
+    pub order: f64,
+    pub deactivated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum RuleKind {
+    /// `sh:TripleRule`. Each component is a node expression, and the inferred
+    /// triples are the cross product of what the three evaluate to.
+    Triple {
+        subject: TermId,
+        predicate: TermId,
+        object: TermId,
+    },
+    /// `sh:SPARQLRule`, whose `sh:construct` query is parsed once at compile
+    /// time so a malformed one is a shapes-graph error rather than a surprise
+    /// during inference.
+    Sparql(Box<crate::sparql::SparqlConstraint>),
 }
 
 impl Shape {
@@ -269,6 +309,8 @@ impl Shape {
             severity,
             messages: Vec::new(),
             deactivated: false,
+            rules: Vec::new(),
+            order: 0.0,
         }
     }
 
@@ -288,6 +330,27 @@ pub struct Shapes {
 }
 
 impl Shapes {
+    /// Every compiled shape, in compilation order.
+    ///
+    /// The rules engine walks all of them rather than only the roots: a rule
+    /// can hang off a property shape, which is never a root.
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = &Shape> {
+        self.shapes.iter()
+    }
+
+    /// The handle for the shape at `index` in [`Shapes::iter`] order.
+    #[inline]
+    pub fn id_at(&self, index: usize) -> ShapeId {
+        ShapeId(index as u32)
+    }
+
+    /// True when no shape declares a rule, which is almost always.
+    #[inline]
+    pub fn has_rules(&self) -> bool {
+        self.shapes.iter().any(|s| !s.rules.is_empty())
+    }
+
     #[inline]
     pub fn get(&self, id: ShapeId) -> &Shape {
         &self.shapes[id.index()]
@@ -458,6 +521,8 @@ impl<'a> Compiler<'a> {
         let targets = self.compile_targets(node);
         let constraints = self.compile_constraints(node, path.as_ref())?;
 
+        let rules = self.compile_rules(node)?;
+
         Ok(Shape {
             node,
             path,
@@ -467,7 +532,68 @@ impl<'a> Compiler<'a> {
             severity,
             messages: g.objects(node, v.sh_message).collect(),
             deactivated,
+            rules,
+            order: self.number(node, v.sh_order).unwrap_or(0.0),
         })
+    }
+
+    /// Reads a numeric literal, for `sh:order`.
+    fn number(&self, node: TermId, predicate: TermId) -> Option<f64> {
+        self.graph
+            .object(node, predicate)
+            .and_then(|t| self.store.lexical_form(t))
+            .and_then(|s| s.parse().ok())
+    }
+
+    /// Compiles the SHACL-AF rules attached to `node` with `sh:rule`.
+    ///
+    /// A rule whose type cannot be told is an error rather than something to
+    /// skip: silently inferring nothing is the failure mode that makes rules
+    /// look supported when they are not.
+    fn compile_rules(&mut self, node: TermId) -> Result<Vec<Rule>> {
+        let v = self.vocab;
+        let g = self.graph;
+        let mut out = Vec::new();
+
+        for rule in g.objects(node, v.sh_rule).collect::<Vec<_>>() {
+            let kind = if let Some(construct) = g.object(rule, v.sh_construct) {
+                let text = self.store.lexical_form(construct).unwrap_or("").to_string();
+                RuleKind::Sparql(Box::new(
+                    crate::sparql::SparqlConstraint::compile_construct(
+                        &text, rule, g, self.store, v,
+                    )?,
+                ))
+            } else if let (Some(subject), Some(predicate), Some(object)) = (
+                g.object(rule, v.sh_subject),
+                g.object(rule, v.sh_predicate),
+                g.object(rule, v.sh_object),
+            ) {
+                RuleKind::Triple {
+                    subject,
+                    predicate,
+                    object,
+                }
+            } else {
+                return Err(Error::Shape(format!(
+                    "rule on {} is neither a triple rule (sh:subject, sh:predicate, sh:object) \
+                     nor a SPARQL rule (sh:construct)",
+                    self.store.to_oxrdf(node)
+                )));
+            };
+
+            out.push(Rule {
+                node: rule,
+                kind,
+                conditions: g.objects(rule, v.sh_condition).collect(),
+                order: self.number(rule, v.sh_order).unwrap_or(0.0),
+                deactivated: g
+                    .object(rule, v.sh_deactivated)
+                    .and_then(|t| self.store.lexical_form(t))
+                    .map(|s| s == "true")
+                    .unwrap_or(false),
+            });
+        }
+        Ok(out)
     }
 
     fn compile_targets(&mut self, node: TermId) -> Vec<Target> {

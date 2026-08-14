@@ -51,7 +51,11 @@ impl GraphBuilder {
 }
 
 /// An immutable RDF graph indexed for the access patterns SHACL uses.
-#[derive(Debug, Default)]
+///
+/// `Clone` copies all three permutations — three words per triple — rather
+/// than rebuilding and re-sorting them, which is what the rules engine wants
+/// when it hands back a graph nothing was added to.
+#[derive(Debug, Default, Clone)]
 pub struct Graph {
     /// Sorted by `(subject, predicate, object)`.
     spo: Vec<Row>,

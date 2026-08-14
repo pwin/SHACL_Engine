@@ -69,6 +69,25 @@ struct Args {
     #[arg(short, long, value_enum, default_value_t = Inference::None)]
     inference: Inference,
 
+    /// Run SHACL-AF rules (`sh:rule`) before validating, so the report sees
+    /// what they infer.
+    ///
+    /// Spelled as pySHACL spells it. Rules are the one part of SHACL that
+    /// derives triples rather than reporting on them, which is why they are
+    /// opt-in: the same data and shapes give a different report with and
+    /// without this.
+    #[arg(short = 'a', long, visible_alias = "advanced-mode")]
+    advanced: bool,
+
+    /// Apply the rules repeatedly, up to `n` rounds, instead of once.
+    ///
+    /// SHACL-AF defines a single pass and declines to say what repeating it
+    /// means, so once is the default. But the obvious uses — transitive
+    /// closure, subclass propagation — need more, and a rule set with no
+    /// fixpoint stops with an error rather than running forever.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    iterate_rules: usize,
+
     /// Validate the shapes graph itself against SHACL's own shapes first, and
     /// refuse to go on if it is malformed.
     #[arg(short = 'm', long, visible_alias = "metashacl")]
@@ -733,6 +752,35 @@ fn run() -> Result<bool> {
         .context("compiling shapes graph")?;
     let compile_time = t1.elapsed();
 
+    // SHACL-AF rules infer triples, so they run after the shapes are compiled
+    // — the rules are in them — and before anything is validated. Off unless
+    // asked for: rules change what the report says, and a report is only
+    // meaningful against a known input.
+    // A separate binding rather than reassigning `data`, because when the
+    // shapes graph *is* the data graph `shapes_ref` borrows it.
+    let inferred;
+    let data = if args.advanced {
+        if !compiled.has_rules() {
+            eprintln!("note: --advanced given but the shapes graph declares no sh:rule");
+        }
+        inferred = if args.iterate_rules > 1 {
+            shacl::rules::apply_iterated(
+                &data,
+                &compiled,
+                shapes_ref,
+                &mut store,
+                &vocab,
+                args.iterate_rules,
+            )
+        } else {
+            shacl::rules::apply(&data, &compiled, shapes_ref, &mut store, &vocab)
+        }
+        .context("applying SHACL-AF rules")?;
+        &inferred
+    } else {
+        &data
+    };
+
     // pySHACL spells the default as a pair of flags. They are honoured rather
     // than ignored: passing one alongside a `--min-severity` that contradicts
     // it means the graph should still be allowed to hold results at that
@@ -763,7 +811,7 @@ fn run() -> Result<bool> {
 
     let t2 = Instant::now();
     let mut report = shacl::validate::validate_in_with(
-        &data,
+        data,
         &compiled,
         shapes_ref,
         &mut store,
@@ -774,7 +822,7 @@ fn run() -> Result<bool> {
     for _ in 1..args.repeat {
         let t = Instant::now();
         report = shacl::validate::validate_in_with(
-            &data,
+            data,
             &compiled,
             shapes_ref,
             &mut store,

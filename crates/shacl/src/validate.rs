@@ -160,6 +160,32 @@ pub fn node_conforms(
     engine.conforms(id, node, &mut Stack::default(), store)
 }
 
+/// The focus nodes `shape` targets in `data`.
+///
+/// Exposed for the rules engine, which fires a shape's rules on exactly the
+/// nodes that shape would validate — so it has to resolve targets the same
+/// way, including the ones that need the validator itself (`sh:targetWhere`
+/// tests conformance, and a SPARQL selector runs a query).
+pub fn focus_nodes_of(
+    shape_id: ShapeId,
+    data: &Graph,
+    shapes: &Shapes,
+    shapes_graph: &Graph,
+    store: &mut TermStore,
+    vocab: &Vocab,
+) -> Result<Vec<TermId>> {
+    let engine = Engine {
+        data,
+        shapes,
+        shapes_graph,
+        vocab,
+        shnex: crate::nodeexpr::Shnex::new(store),
+        max_results: None,
+        blocking: None,
+    };
+    engine.focus_nodes(shapes.get(shape_id), &mut Stack::default(), store)
+}
+
 struct Engine<'a> {
     data: &'a Graph,
     shapes: &'a Shapes,
