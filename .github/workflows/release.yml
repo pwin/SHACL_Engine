@@ -282,19 +282,23 @@ jobs:
       - name: Build both packages
         run: node crates/shacl-wasm/build.mjs
 
-      # No token. npm is configured to trust this repository and workflow, and
-      # the client exchanges a short-lived OIDC token for publish rights — the
-      # same arrangement as `pypi` above, and the reason neither index needs a
-      # long-lived credential stored here.
+      # An npm automation token, which is exempt from the account's 2FA
+      # requirement — an ordinary publish token is not, and fails here with
+      # `EOTP` asking for a code no CI can supply.
       #
-      # It also settles the two-factor problem rather than working around it.
-      # An automation token publishes by being exempt from 2FA; this publishes
-      # without a credential that could be stolen in the first place.
+      # Trusted publishing (OIDC) would be better: no stored credential at all,
+      # and the 2FA question disappears rather than being bypassed. It needs a
+      # trusted publisher configured on npm *per package*, which is why this
+      # still uses the token — switching before that exists would fail every
+      # publish. The `npm@latest` step above is already in place for it, since
+      # OIDC needs npm 11.5.1 and Node 20 ships npm 10.
       #
       # `--access public` is explicit rather than relied upon: these names are
       # unscoped and so public by default, but the flag means a later move to a
       # scope does not silently publish a private package instead.
       - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in pkg-bundler pkg-node; do
             echo "=== $dir ==="
