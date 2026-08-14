@@ -260,8 +260,7 @@ below a recorded baseline.
 ## Python
 
 ```sh
-pip install maturin
-cd crates/shacl-python && maturin develop --release
+pip install shacl
 ```
 
 ```python
@@ -273,7 +272,46 @@ if not report:
         print(r.severity, r.component, r.focus_node, r.value)
 ```
 
-See [crates/shacl-python/README.md](crates/shacl-python/README.md).
+See [crates/shacl-python/README.md](crates/shacl-python/README.md). To work on
+the bindings themselves, build them in place with
+`pip install maturin && cd crates/shacl-python && maturin develop --release`.
+
+## JavaScript
+
+The same engine compiled to WebAssembly. Two packages, because wasm-pack's two
+targets are not interchangeable and one file cannot be both:
+
+```sh
+npm install shacl-wasm        # ESM, for bundlers (vite, webpack, rollup)
+npm install shacl-wasm-node   # CommonJS, for Node and require()
+```
+
+```js
+import { Validator } from 'shacl-wasm';
+
+const v = Validator.fromTurtle(shapesTurtle);   // compile once
+const report = v.validateTurtle(dataTurtle);    // validate many
+for (const r of report.results) {
+  console.log(r.severity, r.component, r.focusNode, r.value);
+}
+```
+
+Results come back as plain objects rather than only as RDF, so rendering
+findings does not mean re-parsing a graph — though `report.toTurtle()` still
+hands over the whole `sh:ValidationReport` for querying or diffing. Terms are
+rendered the way RDF/JS renders `.value`: an IRI bare, a literal as its lexical
+form.
+
+Compile once and reuse the `Validator`. Each run gets its own copy of the term
+store, so reuse is genuinely cheaper rather than quietly accumulating — and on
+wasm32 the first validation of a large graph also pays a one-off cost to grow
+the linear memory, which reuse amortises. Measured on 100k instances: 16.7s on
+the first run against 4.6s on subsequent ones.
+
+`parallel` is off in this build — there are no threads to split a parse
+across — so it takes the sequential path. Conformance is the same 418 of 426
+either way, and the WebAssembly build is checked against the native one over
+every document in the W3C suite; see `crates/shacl-wasm/differential.js`.
 
 ## Licence
 
