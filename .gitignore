@@ -8,3 +8,9 @@ __pycache__/
 # uv writes a `.gitignore` inside the venv too, so this is belt and braces —
 # but it keeps the intent visible to anyone who names their venv differently.
 .venv/
+
+# An `.npmrc` is where an npm token ends up, and a committed token is a
+# published one. Ignored everywhere rather than only at the root, since the
+# publish happens from `crates/shacl-wasm/pkg-*`.
+.npmrc
+node_modules/
