@@ -162,5 +162,52 @@ console.log('\n== the two blank-node bugs, checked against this built artefact =
   check('isBlank($this) keeps only the 3 blank', validateTurtle(filtered('isBlank($this)'), mixed, BASE).length, 3);
 }
 
+
+console.log('\n== SHACL-AF rules through the WASM API ==');
+{
+  const shapes = `
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix ex: <http://example.org/> .
+    @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+    ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+      sh:rule [ a sh:TripleRule ;
+        sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Agent ] .
+    ex:AgentShape a sh:NodeShape ; sh:targetClass ex:Agent ;
+      sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:message "an Agent needs a name" ] .
+  `;
+  const data = `
+    @prefix ex: <http://example.org/> .
+    ex:alice a ex:Person ; ex:name "Alice" .
+    ex:bob   a ex:Person .
+  `;
+  const v = Validator.fromTurtle(shapes, BASE);
+  check('off by default: a rule changes the report, so it is asked for',
+    v.validateTurtle(data, BASE).conforms, true);
+  const r = v.validateTurtle(data, BASE, 'rules');
+  // pySHACL 0.40.1 on the same input: Conforms False, one result on ex:bob.
+  check('inference "rules" infers before validating', r.length, 1);
+  check('and the finding is on ex:bob', r.results[0].focusNode, 'http://example.org/bob');
+
+  // A transitive rule needs more than the single pass the spec defines.
+  const trans = `
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix ex: <http://example.org/> .
+    ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:sub ;
+      sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:sub ;
+                sh:object [ sh:path ( ex:sub ex:sub ) ] ] .
+    ex:Cap a sh:NodeShape ; sh:targetNode ex:a ;
+      sh:property [ sh:path ex:sub ; sh:maxCount 2 ] .
+  `;
+  const chain = '@prefix ex: <http://example.org/> . ex:a ex:sub ex:b . ex:b ex:sub ex:c . ex:c ex:sub ex:d .';
+  const tv = Validator.fromTurtle(trans, BASE);
+  check('one pass stays within maxCount 2', tv.validateTurtle(chain, BASE, 'rules').conforms, true);
+  check('iterating closes the chain and breaks it', tv.validateTurtle(chain, BASE, 'rules-iterated').conforms, false);
+
+  let threw = false;
+  try { v.validateTurtle(data, BASE, 'magic'); } catch (e) { threw = String(e).includes('rules-iterated'); }
+  check('an unknown mode is an error, not a silent none', threw, true);
+}
+
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);

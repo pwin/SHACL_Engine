@@ -629,3 +629,65 @@ ex:S a sh:NodeShape ; sh:targetClass ex:Person ;
         "a rule on a shape with no target must not fire"
     );
 }
+
+/// A rule whose query will not compile must not stop ordinary validation.
+///
+/// Rules are read only when they are asked for, so refusing the whole shapes
+/// graph at compile time punishes callers who never wanted them. This reached
+/// a commit: eagerly parsing `sh:construct` made
+/// `testsuite/shacl12/tests/sparql/rules/rectangle-prefixes.ttl` fail to
+/// compile at all, when it had validated fine before rules existed.
+#[test]
+fn a_broken_rule_does_not_break_validation() {
+    let mut f = fixture(
+        "ex:a a ex:Person .",
+        r#"
+ex:S a sh:NodeShape ; sh:targetClass ex:Person ;
+    sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:message "needs a name" ] ;
+    sh:rule [ a sh:SPARQLRule ; sh:construct "this is not SPARQL at all" ] .
+"#,
+    );
+    // Compiling succeeded — the fixture would have panicked otherwise — and
+    // validation reports the real constraint.
+    let report =
+        shacl::validate::validate_in(&f.data, &f.shapes, &f.shapes_graph, &mut f.store, &f.vocab)
+            .expect("validation should not care about a broken rule");
+    assert_eq!(report.results.len(), 1);
+
+    // Asking for rules is when it becomes an error, rather than being skipped.
+    let err = shacl::rules::apply(&f.data, &f.shapes, &f.shapes_graph, &mut f.store, &f.vocab)
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("cannot run"),
+        "expected the deferred compile error, got: {err}"
+    );
+}
+
+/// `sh:declare` on the shapes graph resolves prefixes for a rule that has no
+/// `sh:prefixes` of its own.
+///
+/// The W3C 1.2 suite writes shapes this way, and the alternative — refusing
+/// the graph over a prefix declared a few lines above — is not a defensible
+/// reading of "not found".
+#[test]
+fn shapes_graph_level_declare_resolves_rule_prefixes() {
+    let mut f = fixture(
+        "ex:r a ex:Rectangle ; ex:width 7 ; ex:height 8 .",
+        r#"
+ex:g a sh:ShapesGraph ;
+    sh:declare [ sh:namespace "http://example.org/" ; sh:prefix "ex" ] .
+ex:S a sh:NodeShape ; sh:targetClass ex:Rectangle ;
+    sh:rule [ a sh:SPARQLRule ; sh:construct """
+        CONSTRUCT { $this ex:area ?a }
+        WHERE { $this ex:width ?w . $this ex:height ?h . BIND(?w * ?h AS ?a) }""" ] .
+"#,
+    );
+    let out = f.apply();
+    let (s, p) = (
+        f.store.named_node("http://example.org/r"),
+        f.store.named_node("http://example.org/area"),
+    );
+    let areas: Vec<_> = out.objects(s, p).collect();
+    assert_eq!(areas.len(), 1, "the rule should have fired");
+    assert_eq!(f.store.lexical_form(areas[0]), Some("56"), "7 * 8 is 56");
+}

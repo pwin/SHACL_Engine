@@ -234,6 +234,28 @@ Deliberately, rather than pending:
   is vendored under `testsuite/shacl12/tests/rules/` but is not wired into the
   harness, so it is not counted in the conformance figure above.
 
+### Named graphs are flattened
+
+TriG and N-Quads are accepted, and their named graphs are **merged into one
+data graph**. A TriG file with two named graphs and a default graph gives
+exactly the results the same triples give flattened into Turtle.
+
+That is what SHACL 1.0 defines — validation is over *a* data graph — but the
+consequences are worth stating plainly, because holding each contributor's
+data in its own named graph is a common and sensible arrangement:
+
+- there is no way to validate one graph rather than the union;
+- a result does not say which graph its focus node came from;
+- triples a rule infers are not attributed to a graph either.
+
+You can still hold data that way and validate the union. What you cannot do
+is validate per contributor, or answer "whose data broke this" from the report.
+Splitting the file, or passing only the graphs you mean, is the way to get
+per-source answers today.
+
+`GRAPH` patterns inside a `sh:sparql` constraint are a separate matter: the
+shapes graph is exposed as `$shapesGraph`, and the data is the default graph.
+
 ## SHACL-AF rules
 
 Rules infer triples before validation, so a report can depend on data that was
@@ -440,6 +462,20 @@ store, so reuse is genuinely cheaper rather than quietly accumulating — and on
 wasm32 the first validation of a large graph also pays a one-off cost to grow
 the linear memory, which reuse amortises. Measured on 100k instances: 16.7s on
 the first run against 4.6s on subsequent ones.
+
+Inference, including SHACL-AF rules, is the second argument to
+`validateTurtle` and the fourth to `validateText`:
+
+```js
+v.validateTurtle(data, base, 'rules');           // sh:rule, one pass
+v.validateTurtle(data, base, 'rules-iterated');  // to a fixpoint, max 10 rounds
+v.validateTurtle(data, base, 'rdfs');            // the RDFS closure
+```
+
+The same four modes the CLI and the Python bindings take — `none`, `rdfs`,
+`rules`, `rules-iterated` — and the same caveats apply, in particular the ones
+under [where rule authors have to be careful](#where-rule-authors-have-to-be-careful).
+An unrecognised mode is an error rather than a silent `none`.
 
 `parallel` is off in this build — there are no threads to split a parse
 across — so it takes the sequential path. Conformance is the same 418 of 426

@@ -33,23 +33,59 @@ fn to_py_err(e: engine::Error) -> PyErr {
 enum Inference {
     None,
     Rdfs,
+    /// SHACL-AF rules, one pass, as the specification defines.
+    Rules,
+    /// The same, repeated to a fixpoint. Outside the specification, which
+    /// defines a single pass, but what a transitive rule needs.
+    RulesIterated,
 }
+
+/// Rounds `"rules-iterated"` allows before giving up. A rule set that mints a
+/// fresh term each round has no fixpoint to reach.
+const MAX_RULE_ROUNDS: usize = 10;
 
 impl Inference {
     fn parse(name: &str) -> PyResult<Self> {
         match name.to_ascii_lowercase().as_str() {
             "none" | "" => Ok(Self::None),
             "rdfs" => Ok(Self::Rdfs),
+            "rules" => Ok(Self::Rules),
+            "rules-iterated" | "rules_iterated" => Ok(Self::RulesIterated),
             other => Err(PyValueError::new_err(format!(
-                "unknown inference {other:?}; use \"none\" or \"rdfs\""
+                "unknown inference {other:?}; use \"none\", \"rdfs\", \"rules\" \
+                 or \"rules-iterated\""
             ))),
         }
     }
 
-    fn apply(self, data: Graph, vocab: &Vocab) -> PyResult<Graph> {
+    /// Materialises whatever this mode asks for.
+    ///
+    /// Rules need more than the data graph — they live in the shapes, fire on
+    /// their targets, and can test conformance — so this takes the compiled
+    /// shapes too rather than only the vocabulary.
+    fn apply(
+        self,
+        data: Graph,
+        shapes: &Shapes,
+        store: &mut TermStore,
+        vocab: &Vocab,
+    ) -> PyResult<Graph> {
         match self {
             Self::None => Ok(data),
             Self::Rdfs => engine::inference::rdfs_closure(&data, vocab).map_err(to_py_err),
+            Self::Rules => {
+                engine::rules::apply(&data, &shapes.compiled, &shapes.shapes_graph, store, vocab)
+                    .map_err(to_py_err)
+            }
+            Self::RulesIterated => engine::rules::apply_iterated(
+                &data,
+                &shapes.compiled,
+                &shapes.shapes_graph,
+                store,
+                vocab,
+                MAX_RULE_ROUNDS,
+            )
+            .map_err(to_py_err),
         }
     }
 }
@@ -269,7 +305,10 @@ impl Shapes {
             let mut b = engine::model::GraphBuilder::new();
             loader::parse_str(text, fmt, base, scope::DATA, &mut store, &mut b)
                 .map_err(to_py_err)?;
-            self.run(&mut store, &inf.apply(b.build(), &self.vocab)?)
+            {
+                let data = inf.apply(b.build(), self, &mut store, &self.vocab)?;
+                self.run(&mut store, &data)
+            }
         })
     }
 
@@ -283,7 +322,10 @@ impl Shapes {
         py.detach(|| {
             let mut store = self.store.clone();
             let data = loader::load_file(&path, scope::DATA, &mut store).map_err(to_py_err)?;
-            self.run(&mut store, &inf.apply(data, &self.vocab)?)
+            {
+                let data = inf.apply(data, self, &mut store, &self.vocab)?;
+                self.run(&mut store, &data)
+            }
         })
     }
 
@@ -309,7 +351,10 @@ impl Shapes {
                 &mut b,
             )
             .map_err(to_py_err)?;
-            self.run(&mut store, &inf.apply(b.build(), &self.vocab)?)
+            {
+                let data = inf.apply(b.build(), self, &mut store, &self.vocab)?;
+                self.run(&mut store, &data)
+            }
         })
     }
 

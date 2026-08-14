@@ -293,9 +293,16 @@ pub enum RuleKind {
         object: TermId,
     },
     /// `sh:SPARQLRule`, whose `sh:construct` query is parsed once at compile
-    /// time so a malformed one is a shapes-graph error rather than a surprise
-    /// during inference.
+    /// time so it is not re-parsed per focus node.
     Sparql(Box<crate::sparql::SparqlConstraint>),
+    /// A rule whose query would not compile, carrying why.
+    ///
+    /// Held rather than raised at compile time. A rule is only consulted when
+    /// rules are asked for, so refusing the whole shapes graph would stop
+    /// ordinary validation — which never reads rules — over a query it was
+    /// never going to run. Raised when the rule would actually have fired, so
+    /// it is not quietly skipped either.
+    Broken(String),
 }
 
 impl Shape {
@@ -558,11 +565,12 @@ impl<'a> Compiler<'a> {
         for rule in g.objects(node, v.sh_rule).collect::<Vec<_>>() {
             let kind = if let Some(construct) = g.object(rule, v.sh_construct) {
                 let text = self.store.lexical_form(construct).unwrap_or("").to_string();
-                RuleKind::Sparql(Box::new(
-                    crate::sparql::SparqlConstraint::compile_construct(
-                        &text, rule, g, self.store, v,
-                    )?,
-                ))
+                match crate::sparql::SparqlConstraint::compile_construct(
+                    &text, rule, g, self.store, v,
+                ) {
+                    Ok(q) => RuleKind::Sparql(Box::new(q)),
+                    Err(e) => RuleKind::Broken(e.to_string()),
+                }
             } else if let (Some(subject), Some(predicate), Some(object)) = (
                 g.object(rule, v.sh_subject),
                 g.object(rule, v.sh_predicate),
@@ -574,11 +582,13 @@ impl<'a> Compiler<'a> {
                     object,
                 }
             } else {
-                return Err(Error::Shape(format!(
+                // Held rather than raised, for the reason `RuleKind::Broken`
+                // gives: this shapes graph may never be asked to run rules.
+                RuleKind::Broken(format!(
                     "rule on {} is neither a triple rule (sh:subject, sh:predicate, sh:object) \
                      nor a SPARQL rule (sh:construct)",
                     self.store.to_oxrdf(node)
-                )));
+                ))
             };
 
             out.push(Rule {

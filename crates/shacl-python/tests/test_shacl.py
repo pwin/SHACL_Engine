@@ -3,6 +3,8 @@
 Run with `maturin develop` first, then `pytest crates/shacl-python/tests`.
 """
 
+import pytest
+
 import shacl
 
 SHAPES = """
@@ -380,3 +382,62 @@ def test_unknown_inference_is_rejected():
     shapes = shacl.Shapes.from_turtle(RDFS_SHAPES)
     with pytest.raises(ValueError, match="inference"):
         shapes.validate_turtle(RDFS_DATA, inference="owlrl")
+
+
+# --------------------------------------------------------------- SHACL-AF rules
+
+RULE_SHAPES = """
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+ex:PersonShape a sh:NodeShape ;
+    sh:targetClass ex:Person ;
+    sh:rule [ a sh:TripleRule ;
+        sh:subject sh:this ; sh:predicate rdf:type ; sh:object ex:Agent ] .
+ex:AgentShape a sh:NodeShape ;
+    sh:targetClass ex:Agent ;
+    sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:message "an Agent needs a name" ] .
+"""
+
+RULE_DATA = """
+@prefix ex: <http://example.org/> .
+ex:alice a ex:Person ; ex:name "Alice" .
+ex:bob   a ex:Person .
+"""
+
+
+def test_rules_are_off_by_default():
+    """A rule changes what the report says, so it has to be asked for."""
+    shapes = shacl.Shapes.from_turtle(RULE_SHAPES)
+    assert shapes.validate_turtle(RULE_DATA).conforms
+
+
+def test_rules_infer_before_validating():
+    """pySHACL 0.40.1 on the same input: Conforms False, one result on ex:bob."""
+    shapes = shacl.Shapes.from_turtle(RULE_SHAPES)
+    report = shapes.validate_turtle(RULE_DATA, inference="rules")
+    assert not report.conforms
+    assert len(report.results) == 1
+    assert report.results[0].focus_node == "<http://example.org/bob>"
+
+
+def test_rules_iterated_closes_a_transitive_rule():
+    """One pass reaches two hops; iterating closes the chain."""
+    shapes = shacl.Shapes.from_turtle("""
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/> .
+ex:S a sh:NodeShape ; sh:targetSubjectsOf ex:sub ;
+    sh:rule [ a sh:TripleRule ; sh:subject sh:this ; sh:predicate ex:sub ;
+              sh:object [ sh:path ( ex:sub ex:sub ) ] ] .
+ex:Cap a sh:NodeShape ; sh:targetNode ex:a ;
+    sh:property [ sh:path ex:sub ; sh:maxCount 2 ] .
+""")
+    data = "@prefix ex: <http://example.org/> . ex:a ex:sub ex:b . ex:b ex:sub ex:c . ex:c ex:sub ex:d ."
+    assert shapes.validate_turtle(data, inference="rules").conforms
+    assert not shapes.validate_turtle(data, inference="rules-iterated").conforms
+
+
+def test_an_unknown_inference_mode_is_rejected():
+    shapes = shacl.Shapes.from_turtle(RULE_SHAPES)
+    with pytest.raises(ValueError, match="rules-iterated"):
+        shapes.validate_turtle(RULE_DATA, inference="magic")

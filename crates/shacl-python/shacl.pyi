@@ -112,9 +112,16 @@ class Shapes:
     ) -> Report:
         """Validates a data graph held in memory, in any supported format.
 
-        `inference` materialises entailed triples into the data graph first:
-        "none" (the default) or "rdfs". Off by default because it changes what
-        the report says, so it should be asked for rather than assumed.
+        `inference` materialises triples into the data graph first:
+
+        - "none" (the default)
+        - "rdfs" — the RDFS closure
+        - "rules" — SHACL-AF rules (`sh:rule`), one pass, as the spec defines
+        - "rules-iterated" — the same, repeated to a fixpoint, which a
+          transitive rule needs and the spec does not define
+
+        Off by default because it changes what the report says, so it should
+        be asked for rather than assumed.
         """
         ...
 

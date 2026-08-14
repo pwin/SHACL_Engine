@@ -20,6 +20,7 @@ use engine::inference;
 use engine::model::loader::{self, RdfFormat};
 use engine::model::{Graph, GraphBuilder, TermId, TermStore, Vocab};
 use engine::report::ValidationReport;
+use engine::rules;
 use engine::shapes::Shapes;
 use engine::validate;
 use serde::Serialize;
@@ -161,9 +162,15 @@ impl Validator {
 
     /// Validates a data graph in any supported format.
     ///
-    /// `inference` is `"none"` (default) or `"rdfs"`; the latter validates
-    /// against the RDFS closure of the data, so a finding can depend on an
-    /// entailed `rdf:type` rather than only an asserted one.
+    /// `inference` selects what is materialised before validating:
+    ///
+    /// - `"none"` (default)
+    /// - `"rdfs"` — the RDFS closure, so a finding can depend on an entailed
+    ///   `rdf:type` rather than only an asserted one
+    /// - `"rules"` — SHACL-AF rules (`sh:rule`), one pass, as the
+    ///   specification defines
+    /// - `"rules-iterated"` — the same, repeated to a fixpoint, which a
+    ///   transitive rule needs and the specification does not define
     #[wasm_bindgen(js_name = validateText)]
     pub fn validate_text(
         &self,
@@ -186,9 +193,32 @@ impl Validator {
         let data = match inference.as_deref().unwrap_or("none") {
             "none" => data,
             "rdfs" => inference::rdfs_closure(&data, &self.vocab).map_err(err)?,
+            // SHACL-AF rules, spelled as an inference mode because that is
+            // what they are from a caller's point of view: triples that exist
+            // in the report's world and not in the input. `rules-iterated`
+            // repeats to a fixpoint, which the specification does not define
+            // but every transitive rule needs.
+            "rules" => rules::apply(
+                &data,
+                &self.shapes,
+                &self.shapes_graph,
+                &mut store,
+                &self.vocab,
+            )
+            .map_err(err)?,
+            "rules-iterated" => rules::apply_iterated(
+                &data,
+                &self.shapes,
+                &self.shapes_graph,
+                &mut store,
+                &self.vocab,
+                MAX_RULE_ROUNDS,
+            )
+            .map_err(err)?,
             other => {
                 return Err(JsValue::from_str(&format!(
-                    "unknown inference {other:?}: expected \"none\" or \"rdfs\""
+                    "unknown inference {other:?}: expected \"none\", \"rdfs\", \
+                     \"rules\" or \"rules-iterated\""
                 )));
             }
         };
@@ -290,6 +320,11 @@ pub fn validate_turtle_once(
     let validator = Validator::from_turtle(shapes, base.clone())?;
     validator.validate_turtle(data, base, None)
 }
+
+/// Rounds `"rules-iterated"` allows before giving up. A rule set that mints a
+/// fresh term each round has no fixpoint, and a browser tab is a worse place
+/// than most to discover that.
+const MAX_RULE_ROUNDS: usize = 10;
 
 fn default_base() -> String {
     // Turtle needs *some* base to resolve relative IRIs against. This one is

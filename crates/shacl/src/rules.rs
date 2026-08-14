@@ -227,6 +227,12 @@ fn fire(
             }
             Ok(())
         }
+        // Deferred from compilation: this rule would have run, so the error
+        // that stopped it being built is raised now rather than skipped.
+        RuleKind::Broken(why) => Err(Error::Shape(format!(
+            "rule on {} cannot run: {why}",
+            store.to_oxrdf(rule.node)
+        ))),
         RuleKind::Sparql(q) => {
             let this = crate::sparql::to_term(focus, store);
             let triples = crate::sparql::run_construct(&q.query, &[("this", this)], data, store)?;
