@@ -262,9 +262,14 @@ jobs:
       # older client has no idea OIDC exists: it looks for a token, finds none,
       # and fails with ENEEDAUTH rather than anything mentioning OIDC. Upgrading
       # the client is what makes the exchange possible at all.
+      # Pinned to a major version, not `latest`. npm 12 requires Node 22 or
+      # newer and the runner here is on 20, so `npm@latest` began failing the
+      # install outright — a moving dependency that broke a release without
+      # anything in this repository changing. npm 11 is the version trusted
+      # publishing needs (11.5.1+) and still runs on Node 20.
       - name: Use an npm that can do trusted publishing
         run: |
-          npm install -g npm@latest
+          npm install -g npm@11
           npm --version
       - name: Install wasm-pack
         run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
