@@ -271,11 +271,32 @@ struct Stack {
 /// more than one carrying `sh:datatype`. Since the guarantee being made here is
 /// that the process never dies, the margin belongs on the safe side of that.
 ///
-/// 48 is far more nesting than a hand-written shapes graph uses. What it does
-/// not cover is a *recursive* shape walked over a long data chain — a linked
-/// list of 100 items, say — which stops with an error rather than a report.
-/// Lifting that needs the descent moved off the call stack, not a bigger
-/// number here.
+/// Measured rather than guessed, on the cheapest possible recursive shape —
+/// one `sh:property` pointing at itself, walked down a chain of `ex:next`:
+///
+/// | build | chain length that kills the process |
+/// | --- | --- |
+/// | debug | under 100 |
+/// | release | about 410 |
+///
+/// The constant has to be safe in the tightest of those, because that is where
+/// the tests run and where a `cargo run` lands. 48 leaves roughly a factor of
+/// two under the debug figure, and a level carrying a SPARQL constraint costs
+/// more stack than the one measured, so the margin is not generous.
+///
+/// This is a real limit on real data, not a theoretical one. A recursive shape
+/// spends one level per link, plus one for the shape it starts from, so a
+/// chain of 47 links is refused — and an RDF collection of 47 items is a
+/// 47-link `rdf:rest` chain. Raising the number is not available: the debug
+/// build dies at 100, which is still short of an ordinary list.
+///
+/// Lifting it properly means moving the descent off the call stack. The depth
+/// has two unrelated sources — shape nesting, which is written by hand and
+/// genuinely shallow, and property descent, which is as deep as the data — and
+/// only the second needs to become iterative. `sh:property` is the tractable
+/// case: its results go straight to the output buffer and nothing reads its
+/// return value, unlike `sh:node` or `sh:not`, which have to ask whether the
+/// nested shape produced anything.
 const MAX_DEPTH: usize = 48;
 
 impl Engine<'_> {
@@ -423,7 +444,8 @@ impl Engine<'_> {
         };
         if stack.depth >= MAX_DEPTH {
             return Err(Error::Recursion(format!(
-                "shapes nested more than {MAX_DEPTH} deep"
+                "shapes nested more than {MAX_DEPTH} deep; a recursive shape spends one level per link of the data it walks, so a chain longer than {} is refused",
+                MAX_DEPTH - 2
             )));
         }
 

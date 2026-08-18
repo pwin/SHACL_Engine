@@ -208,3 +208,43 @@ ex:a ex:list ( ex:a ) .
     // Terminating at all is the point; the count only pins the current answer.
     assert!(validate(data, shapes).is_ok());
 }
+
+/// The limit translated into data, which is how anyone actually meets it.
+///
+/// A recursive shape spends one level per link plus one for the shape it
+/// starts from, so the longest chain that validates is `MAX_DEPTH - 2`. That
+/// arithmetic is what the error message promises, and it is worth pinning
+/// because the number a user holds is a chain length, not a nesting depth: an
+/// RDF collection of 47 items is a 47-link `rdf:rest` chain, and the README
+/// quotes the same figure.
+#[test]
+fn the_longest_chain_that_validates_is_46_links() {
+    let shapes = r#"
+@prefix ex: <http://example.org/ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+ex:Root a sh:NodeShape ; sh:targetNode ex:a0 ; sh:property ex:Link .
+ex:Link a sh:PropertyShape ; sh:path ex:next ; sh:nodeKind sh:IRI ;
+    sh:property ex:Link .
+"#;
+    let chain = |links: usize| {
+        let mut s = String::from("@prefix ex: <http://example.org/ns#> .\n");
+        for i in 0..links {
+            s.push_str(&format!("ex:a{i} ex:next ex:a{}.\n", i + 1));
+        }
+        s
+    };
+
+    assert!(
+        validate(&chain(46), shapes).is_ok(),
+        "46 links is the documented ceiling and must validate"
+    );
+
+    let Err(err) = validate(&chain(47), shapes) else {
+        panic!("47 links should exceed the limit");
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("longer than 46"),
+        "the error should name the chain length, not only the depth: {msg}"
+    );
+}

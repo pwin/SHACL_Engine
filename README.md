@@ -200,23 +200,44 @@ There is also a hard ceiling of **48 levels of nesting**, and reaching it is an
 error rather than a partial report:
 
 ```
-error: recursion limit exceeded: shapes nested more than 48 deep
+error: recursion limit exceeded: shapes nested more than 48 deep; a recursive shape spends one level per link of the data it walks, so a chain longer than 46 is refused
 ```
+
+**Read that as a limit on your data, not on your shapes.** A recursive shape
+spends one level per link it walks, plus one for the shape it starts from, so
+the longest chain it can follow is 46:
+
+| what you have | what happens |
+| --- | --- |
+| a shapes graph nested 48 deep by hand | you will never write this |
+| a recursive shape over a 46-link chain | validates |
+| a recursive shape over a 47-link chain | refused |
+| an RDF collection of 47 items | a 47-link `rdf:rest` chain — refused |
+
+That last row is the one that bites. Lists are ordinary, and a recursive shape
+over one is ordinary; 47 is not a large number.
 
 The ceiling exists because cycle detection alone does not bound the descent:
 the number of distinct (shape, node) pairs is the product of the two, so a
-recursive shape walked over a long data chain — a linked list of a few hundred
-items — can still exhaust the call stack. A stack overflow is not a panic, so
-it cannot be caught or turned into an error; it takes the process down, and
-with it any host embedding the engine. Refusing early is what makes the failure
-recoverable.
+recursive shape over a long chain still exhausts the call stack. A stack
+overflow is not a panic, so it cannot be caught or turned into an error; it
+takes the process down, and with it any host embedding the engine — the Python
+and WebAssembly bindings included, whose whole error story is that a Rust
+failure becomes an exception.
 
-48 is far more nesting than a hand-written shapes graph uses, and it is set
-well below where the stack actually runs out because the cost of a level is not
-fixed — one carrying a SPARQL constraint is much more expensive than one
-carrying `sh:datatype`. If you hit it, the shapes are almost certainly walking
-a data structure rather than nesting: raising the number would not help, since
-the fix is to move the descent off the call stack.
+**Raising the number is not available.** Measured on the cheapest possible
+recursive shape, the process dies at a chain of about 410 links in a release
+build and under 100 in a debug one. The constant has to be safe in the tightest
+of those, which is where the tests run, so 48 already leaves only about a
+factor of two.
+
+The real fix is to move the descent off the call stack, and it is not done. The
+depth has two unrelated sources: shape nesting, which is written by hand and
+genuinely shallow, and property descent, which is as deep as the data. Only the
+second needs to become iterative, and `sh:property` is the tractable case —
+its results go straight to the report and nothing reads its return value,
+unlike `sh:node` or `sh:not`, which have to ask whether the nested shape
+produced anything.
 
 ### Not implemented
 
