@@ -196,48 +196,44 @@ specification leaves what to do about it to the implementation. Cycles are
 detected — a (shape, focus node) pair already being validated is not entered
 again — so an ordinary recursive shape terminates and reports normally.
 
-There is also a hard ceiling of **48 levels of nesting**, and reaching it is an
+**A recursive shape can follow a chain of any length.** The descent through
+`sh:property` runs on an explicit stack rather than the call stack, so
+following a linked list, a `rdf:rest` chain, a `skos:broader` ladder or a
+part-of hierarchy costs heap rather than stack. A 20,000-link chain is in the
+test suite; a debug build used to die at about 100.
+
+There is still a ceiling of **48 levels of nesting**, and reaching it is an
 error rather than a partial report:
 
 ```
-error: recursion limit exceeded: shapes nested more than 48 deep; a recursive shape spends one level per link of the data it walks, so a chain longer than 46 is refused
+error: recursion limit exceeded: shapes nested more than 48 deep; a recursive shape nests one level per shape-valued constraint, not per link of data
 ```
 
-**Read that as a limit on your data, not on your shapes.** A recursive shape
-spends one level per link it walks, plus one for the shape it starts from, so
-the longest chain it can follow is 46:
+What it counts is worth being exact about, because the two things are easy to
+confuse:
 
-| what you have | what happens |
+| | counted? |
 | --- | --- |
-| a shapes graph nested 48 deep by hand | you will never write this |
-| a recursive shape over a 46-link chain | validates |
-| a recursive shape over a 47-link chain | refused |
-| an RDF collection of 47 items | a 47-link `rdf:rest` chain — refused |
+| `sh:property` descending through data | no — heap, unbounded |
+| `sh:node`, `sh:not`, `sh:or`, `sh:qualifiedValueShape` nested by hand | yes |
 
-That last row is the one that bites. Lists are ordinary, and a recursive shape
-over one is ordinary; 47 is not a large number.
+The difference is that `sh:property` needs no answer — its results go straight
+to the report — so the work can be deferred to a stack. `sh:node` and the
+logical constraints have to *ask* whether a nested shape produced anything, so
+they wait, and waiting costs a call frame. Those nest by shape structure, which
+is written by hand: 48 is far more than anyone writes.
 
-The ceiling exists because cycle detection alone does not bound the descent:
-the number of distinct (shape, node) pairs is the product of the two, so a
-recursive shape over a long chain still exhausts the call stack. A stack
-overflow is not a panic, so it cannot be caught or turned into an error; it
-takes the process down, and with it any host embedding the engine — the Python
-and WebAssembly bindings included, whose whole error story is that a Rust
-failure becomes an exception.
+The ceiling exists because a stack overflow is not a panic. It cannot be caught
+or turned into an error; it takes the process down, and with it any host
+embedding the engine — the Python and WebAssembly bindings included, whose
+whole error story is that a Rust failure becomes an exception. Measured on the
+cheapest possible recursive shape, the process dies somewhere under 100 levels
+in a debug build and at about 410 in a release one, so 48 leaves roughly a
+factor of two in the tighter of the two.
 
-**Raising the number is not available.** Measured on the cheapest possible
-recursive shape, the process dies at a chain of about 410 links in a release
-build and under 100 in a debug one. The constant has to be safe in the tightest
-of those, which is where the tests run, so 48 already leaves only about a
-factor of two.
-
-The real fix is to move the descent off the call stack, and it is not done. The
-depth has two unrelated sources: shape nesting, which is written by hand and
-genuinely shallow, and property descent, which is as deep as the data. Only the
-second needs to become iterative, and `sh:property` is the tractable case —
-its results go straight to the report and nothing reads its return value,
-unlike `sh:node` or `sh:not`, which have to ask whether the nested shape
-produced anything.
+One limit remains uncounted: compiling a shapes graph recurses per nested
+shape reference, so a graph nesting `sh:node` some hundreds deep can overflow
+during compilation, before any of the above applies.
 
 ### Not implemented
 

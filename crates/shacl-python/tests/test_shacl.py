@@ -232,21 +232,58 @@ ex:Root a sh:NodeShape ; sh:targetNode ex:a ; sh:property ex:Q1 .
     assert report.conforms
 
 
-def test_excessive_nesting_raises_rather_than_crashing():
-    """Beyond the depth limit the answer is an exception, not a dead process."""
-    import pytest
+def test_a_long_chain_validates_rather_than_dying():
+    """A recursive shape may follow a chain of any length.
 
+    The descent through `sh:property` runs on an explicit stack, so this costs
+    heap rather than call frames. It used to be refused at 47 links, and
+    lifting the limit merely moved the failure to a stack overflow -- which in
+    these bindings is the one error that cannot become a Python exception,
+    because it kills the interpreter outright.
+    """
     shapes = shacl.Shapes.from_turtle("""
 @prefix ex: <http://ex/> .
 @prefix sh: <http://www.w3.org/ns/shacl#> .
-ex:Q a sh:PropertyShape ; sh:path ex:knows ; sh:property ex:Q .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:Q a sh:PropertyShape ; sh:path ex:knows ; sh:property ex:Q ;
+    sh:property [ sh:path ex:age ; sh:datatype xsd:integer ] .
 ex:Root a sh:NodeShape ; sh:targetNode ex:a0 ; sh:property ex:Q .
 """)
-    chain = "@prefix ex: <http://ex/> .\n" + "".join(
-        f"ex:a{i} ex:knows ex:a{i + 1} .\n" for i in range(500)
-    )
+    links = 5000
+    lines = ["@prefix ex: <http://ex/> ."]
+    for i in range(links):
+        lines.append(f"ex:a{i} ex:knows ex:a{i + 1} .")
+    for i in range(1, links + 1):
+        lines.append(f'ex:a{i} ex:age "x" .')
+    chain = "\n".join(lines)
+
+    report = shapes.validate_turtle(chain)
+    # One finding per node past the first, so a walk that stopped early would
+    # show up as a short count rather than passing quietly.
+    assert len(report.results) == links
+
+
+def test_excessive_shape_nesting_raises_rather_than_crashing():
+    """Nesting still has a ceiling, and reaching it is an exception.
+
+    What counts towards it is shape-valued constraints -- `sh:node` here --
+    which have to ask whether a nested shape produced anything and so wait on
+    a call frame. `sh:property` does not, which is why it no longer counts.
+    """
+    import pytest
+
+    parts = [
+        "@prefix ex: <http://ex/> .",
+        "@prefix sh: <http://www.w3.org/ns/shacl#> .",
+        "ex:Root a sh:NodeShape ; sh:targetNode ex:a ; sh:node ex:S0 .",
+    ]
+    for i in range(60):
+        parts.append(f"ex:S{i} a sh:NodeShape ; sh:node ex:S{i + 1} .")
+    parts.append("ex:S60 a sh:NodeShape .")
+    shapes_src = "\n".join(parts)
+    shapes = shacl.Shapes.from_turtle(shapes_src)
     with pytest.raises(ValueError, match="recursion"):
-        shapes.validate_turtle(chain)
+        shapes.validate_turtle("@prefix ex: <http://ex/> . ex:a ex:p 1 .")
 
 
 def test_stubs_match_the_module():

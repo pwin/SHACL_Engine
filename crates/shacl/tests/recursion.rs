@@ -127,70 +127,6 @@ ex:a2 ex:age "x" . ex:a3 ex:age "y" . ex:a4 ex:age "z" .
     assert_eq!(validate(data, shapes).unwrap(), 3);
 }
 
-/// Distinct pairs do not bound the descent on their own — their number is the
-/// product of shapes and nodes — so a long enough chain must hit the depth cap
-/// and say so, rather than overflowing or quietly returning a short report.
-#[test]
-fn a_chain_deeper_than_the_limit_is_an_error_not_a_crash() {
-    let shapes = r#"
-@prefix ex: <http://example.org/ns#> .
-@prefix sh: <http://www.w3.org/ns/shacl#> .
-ex:Q a sh:PropertyShape ; sh:path ex:knows ; sh:property ex:Q .
-ex:Root a sh:NodeShape ; sh:targetNode ex:a0 ; sh:property ex:Q .
-"#;
-    let mut data = String::from("@prefix ex: <http://example.org/ns#> .\n");
-    for i in 0..500 {
-        data.push_str(&format!("ex:a{i} ex:knows ex:a{}.\n", i + 1));
-    }
-    match validate(&data, shapes) {
-        Err(shacl::Error::Recursion(m)) => assert!(m.contains("48"), "unexpected message: {m}"),
-        other => panic!("expected a recursion error, got {other:?}"),
-    }
-}
-
-/// The README documents the limit and quotes the error. Both are the kind of
-/// prose that goes stale silently — a reader who trusts a stale number debugs
-/// the wrong thing — so the number is asserted against the message the engine
-/// actually produces rather than maintained by hand.
-#[test]
-fn the_readme_quotes_the_real_recursion_error() {
-    let shapes = r#"
-@prefix ex: <http://example.org/ns#> .
-@prefix sh: <http://www.w3.org/ns/shacl#> .
-ex:Q a sh:PropertyShape ; sh:path ex:knows ; sh:property ex:Q .
-ex:Root a sh:NodeShape ; sh:targetNode ex:a0 ; sh:property ex:Q .
-"#;
-    let mut data = String::from("@prefix ex: <http://example.org/ns#> .\n");
-    for i in 0..500 {
-        data.push_str(&format!("ex:a{i} ex:knows ex:a{}.\n", i + 1));
-    }
-    let Err(err) = validate(&data, shapes) else {
-        panic!("expected a recursion error");
-    };
-
-    let readme = std::fs::read_to_string(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
-    )
-    .expect("README.md should be readable");
-
-    // `Display` prefixes "recursion limit exceeded:", which is what a user
-    // sees, so the README is checked against the whole rendered line.
-    let line = err.to_string();
-    assert!(
-        readme.contains(&line),
-        "README should quote the real error, which is:\n{line}"
-    );
-
-    let depth: usize = line
-        .split_whitespace()
-        .find_map(|w| w.parse().ok())
-        .expect("the message should name the depth");
-    assert!(
-        readme.contains(&format!("**{depth} levels of nesting**")),
-        "README should say {depth} levels; update it when MAX_DEPTH moves"
-    );
-}
-
 /// `sh:memberShape` recursed without the guard too.
 #[test]
 fn a_recursive_member_shape_terminates() {
@@ -209,42 +145,115 @@ ex:a ex:list ( ex:a ) .
     assert!(validate(data, shapes).is_ok());
 }
 
-/// The limit translated into data, which is how anyone actually meets it.
+/// A chain far longer than any call stack would allow, validated to the end.
 ///
-/// A recursive shape spends one level per link plus one for the shape it
-/// starts from, so the longest chain that validates is `MAX_DEPTH - 2`. That
-/// arithmetic is what the error message promises, and it is worth pinning
-/// because the number a user holds is a chain length, not a nesting depth: an
-/// RDF collection of 47 items is a 47-link `rdf:rest` chain, and the README
-/// quotes the same figure.
+/// This is the property the explicit descent stack buys. Before it, the depth
+/// limit refused a 47-link chain, and lifting the limit merely moved the
+/// failure to a stack overflow at about 100 links in a debug build. Both were
+/// limits on the *data* rather than on the shapes, which is the thing a
+/// validator has no business imposing: an RDF collection of 47 items is a
+/// 47-link `rdf:rest` chain, and lists are ordinary.
 #[test]
-fn the_longest_chain_that_validates_is_46_links() {
+fn a_chain_far_deeper_than_the_call_stack_still_validates() {
     let shapes = r#"
 @prefix ex: <http://example.org/ns#> .
 @prefix sh: <http://www.w3.org/ns/shacl#> .
-ex:Root a sh:NodeShape ; sh:targetNode ex:a0 ; sh:property ex:Link .
-ex:Link a sh:PropertyShape ; sh:path ex:next ; sh:nodeKind sh:IRI ;
-    sh:property ex:Link .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:Q a sh:PropertyShape ;
+    sh:path ex:knows ;
+    sh:property ex:Q ;
+    sh:property [ sh:path ex:age ; sh:datatype xsd:integer ] .
+ex:Root a sh:NodeShape ; sh:targetNode ex:a0 ; sh:property ex:Q .
 "#;
-    let chain = |links: usize| {
-        let mut s = String::from("@prefix ex: <http://example.org/ns#> .\n");
-        for i in 0..links {
-            s.push_str(&format!("ex:a{i} ex:next ex:a{}.\n", i + 1));
-        }
-        s
-    };
+    // 20,000 links. A debug build overflowed at about 100 when this ran on the
+    // call stack, so any number well past that proves the descent moved off it.
+    const LINKS: usize = 20_000;
+    let mut data = String::from("@prefix ex: <http://example.org/ns#> .\n");
+    for i in 0..LINKS {
+        data.push_str(&format!("ex:a{i} ex:knows ex:a{}.\n", i + 1));
+    }
+    // Every node past the first carries a bad age, so the count says the walk
+    // reached the end rather than stopping quietly somewhere in the middle.
+    for i in 1..=LINKS {
+        data.push_str(&format!("ex:a{i} ex:age \"x\".\n"));
+    }
 
+    assert_eq!(
+        validate(&data, shapes).unwrap(),
+        LINKS,
+        "every link should have been reached"
+    );
+}
+
+/// The limit still exists, and still counts what it was built to count.
+///
+/// Shape-valued constraints — `sh:node` here — recurse, because they need to
+/// know whether the nested shape produced anything rather than just appending
+/// to a buffer. Those nest by shape structure, so a shapes graph nested deeply
+/// enough by hand is still refused rather than allowed to exhaust the stack.
+#[test]
+fn deeply_nested_shape_valued_constraints_are_still_refused() {
+    let mut shapes = String::from(
+        "@prefix ex: <http://example.org/ns#> .\n\
+         @prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+         ex:Root a sh:NodeShape ; sh:targetNode ex:a ; sh:node ex:S0 .\n",
+    );
+    // A chain of sh:node, one shape per level, past MAX_DEPTH.
+    for i in 0..60 {
+        shapes.push_str(&format!(
+            "ex:S{i} a sh:NodeShape ; sh:node ex:S{} .\n",
+            i + 1
+        ));
+    }
+    shapes.push_str("ex:S60 a sh:NodeShape .\n");
+    let data = "@prefix ex: <http://example.org/ns#> .\nex:a ex:p 1 .\n";
+
+    match validate(data, &shapes) {
+        Err(shacl::Error::Recursion(m)) => {
+            assert!(m.contains("48"), "unexpected message: {m}");
+        }
+        other => panic!("expected a recursion error, got {other:?}"),
+    }
+}
+
+/// The README quotes the real error. Prose about a limit goes stale silently,
+/// and a reader trusting a stale number debugs the wrong thing.
+#[test]
+fn the_readme_quotes_the_real_recursion_error() {
+    let mut shapes = String::from(
+        "@prefix ex: <http://example.org/ns#> .\n\
+         @prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+         ex:Root a sh:NodeShape ; sh:targetNode ex:a ; sh:node ex:S0 .\n",
+    );
+    for i in 0..60 {
+        shapes.push_str(&format!(
+            "ex:S{i} a sh:NodeShape ; sh:node ex:S{} .\n",
+            i + 1
+        ));
+    }
+    shapes.push_str("ex:S60 a sh:NodeShape .\n");
+    let data = "@prefix ex: <http://example.org/ns#> .\nex:a ex:p 1 .\n";
+
+    let Err(err) = validate(data, &shapes) else {
+        panic!("expected a recursion error");
+    };
+    let line = err.to_string();
+
+    let readme = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+    )
+    .expect("README.md should be readable");
     assert!(
-        validate(&chain(46), shapes).is_ok(),
-        "46 links is the documented ceiling and must validate"
+        readme.contains(&line),
+        "README should quote the real error, which is:\n{line}"
     );
 
-    let Err(err) = validate(&chain(47), shapes) else {
-        panic!("47 links should exceed the limit");
-    };
-    let msg = err.to_string();
+    let depth: usize = line
+        .split_whitespace()
+        .find_map(|w| w.parse().ok())
+        .expect("the message should name the depth");
     assert!(
-        msg.contains("longer than 46"),
-        "the error should name the chain length, not only the depth: {msg}"
+        readme.contains(&format!("**{depth} levels of nesting**")),
+        "README should say {depth} levels; update it when MAX_DEPTH moves"
     );
 }

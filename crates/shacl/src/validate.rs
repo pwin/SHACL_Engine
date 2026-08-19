@@ -297,6 +297,30 @@ struct Stack {
 /// case: its results go straight to the output buffer and nothing reads its
 /// return value, unlike `sh:node` or `sh:not`, which have to ask whether the
 /// nested shape produced anything.
+/// One shape being validated, on the explicit descent stack.
+struct Frame {
+    id: ShapeId,
+    /// The focus-to-values relation, computed once when the frame is pushed.
+    sets: ValueSets,
+    /// Index of the next constraint to evaluate.
+    next: usize,
+    /// `stack.pairs.len()` before this frame pushed its own, so unwinding
+    /// removes exactly what it added.
+    mark: usize,
+}
+
+/// Drops everything a frame added to the visited set.
+///
+/// Removing by value is idempotent, which is what makes a repeated focus node
+/// -- possible at the top level, where the filter is skipped because nothing
+/// can have been visited yet -- safe to push twice and drop once.
+fn unwind(stack: &mut Stack, mark: usize) {
+    for pair in &stack.pairs[mark..] {
+        stack.seen.remove(pair);
+    }
+    stack.pairs.truncate(mark);
+}
+
 const MAX_DEPTH: usize = 48;
 
 impl Engine<'_> {
@@ -403,6 +427,21 @@ impl Engine<'_> {
 
     // ------------------------------------------------------------ validation
 
+    /// Validates `focus` against the shape, and everything `sh:property`
+    /// reaches from it.
+    ///
+    /// The descent through `sh:property` runs on an explicit stack rather than
+    /// the call stack. That is what stops the depth limit being a limit on the
+    /// *data*: a recursive shape following a chain spends one frame per link,
+    /// and frames are heap-allocated, so the chain can be as long as the graph
+    /// is. What still recurses is `sh:node`, `sh:not` and the other constraints
+    /// that ask whether a nested shape produced anything -- they need an
+    /// answer, not a buffer, and they nest by shape structure, which is written
+    /// by hand and shallow.
+    ///
+    /// `sh:property` is the tractable case precisely because it needs no
+    /// answer: its results go straight to `out`, so the work can be deferred to
+    /// a stack instead of being waited on.
     fn validate_shape(
         &self,
         id: ShapeId,
@@ -410,6 +449,89 @@ impl Engine<'_> {
         out: &mut Vec<ValidationResult>,
         stack: &mut Stack,
         store: &mut TermStore,
+    ) -> Result<()> {
+        // One level of *call-stack* depth per invocation. Frames pushed inside
+        // the loop below cost heap rather than stack, so they are deliberately
+        // not counted: the limit exists to keep the process alive, and they
+        // cannot threaten it.
+        if stack.depth >= MAX_DEPTH {
+            return Err(Error::Recursion(format!(
+                "shapes nested more than {MAX_DEPTH} deep; a recursive shape nests one level per shape-valued constraint, not per link of data"
+            )));
+        }
+        stack.depth += 1;
+
+        let mut frames: Vec<Frame> = Vec::new();
+        let mut outcome = self.push_frame(id, focus, stack, &mut frames);
+        if outcome.is_ok() {
+            outcome = self.run_frames(&mut frames, out, stack, store);
+        }
+
+        // Unwind whatever is still standing, so an error leaves the visited set
+        // exactly as it was found. The recursive form got this from the
+        // language; an explicit stack has to do it by hand.
+        while let Some(frame) = frames.pop() {
+            unwind(stack, frame.mark);
+        }
+        stack.depth -= 1;
+        outcome
+    }
+
+    /// Drives the frame stack until it empties.
+    fn run_frames(
+        &self,
+        frames: &mut Vec<Frame>,
+        out: &mut Vec<ValidationResult>,
+        stack: &mut Stack,
+        store: &mut TermStore,
+    ) -> Result<()> {
+        while let Some(i) = frames.len().checked_sub(1) {
+            let shape = self.shapes.get(frames[i].id);
+
+            // `out` is whichever buffer this shape is filling, which for a
+            // nested shape is a scratch one rather than the report. Stopping
+            // early is still sound there, and is in fact the point: `conforms`
+            // and the nested-detail constraints only ever ask whether their
+            // buffer stayed empty.
+            if self.enough(out) || frames[i].next >= shape.constraints.len() {
+                let mark = frames[i].mark;
+                frames.pop();
+                unwind(stack, mark);
+                continue;
+            }
+
+            let k = frames[i].next;
+            frames[i].next += 1;
+
+            match &shape.constraints[k] {
+                // Deferred rather than recursed. The nested shape's results are
+                // reported directly, not wrapped in a result for the property
+                // constraint itself, so nothing here needs its outcome.
+                //
+                // Values are deliberately not deduplicated across rows: the
+                // nested shape is evaluated once per (focus node, value) pair,
+                // so a value reached from two focus nodes is validated twice
+                // and yields two results.
+                Constraint::Property(inner) => {
+                    let inner = *inner;
+                    let values: Vec<TermId> = frames[i].sets.all_values().to_vec();
+                    self.push_frame(inner, &values, stack, frames)?;
+                }
+                constraint => {
+                    self.eval(shape, constraint, &frames[i].sets, out, stack, store)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Pushes a frame for `id` over `focus`, unless there is nothing to do.
+    fn push_frame(
+        &self,
+        id: ShapeId,
+        focus: &[TermId],
+        stack: &mut Stack,
+        frames: &mut Vec<Frame>,
     ) -> Result<()> {
         let shape = self.shapes.get(id);
         if shape.deactivated || focus.is_empty() {
@@ -419,7 +541,7 @@ impl Engine<'_> {
         // A shapes graph may be recursive: `sh:property`, `sh:memberShape` and
         // `sh:reifierShape` can all reach a shape that reaches them back. Drop
         // the focus nodes already being validated against this shape, which
-        // breaks the cycle and counts the repeat visit as conforming — the
+        // breaks the cycle and counts the repeat visit as conforming -- the
         // reading the spec leaves open, and the one `conforms` depends on.
         //
         // Only the same (shape, node) pair is dropped, so a shape cycle walked
@@ -427,7 +549,7 @@ impl Engine<'_> {
         // chain; it is not truncated at the first repeated shape.
         //
         // Nothing can repeat while the stack is empty, so the top-level focus
-        // set — much the largest — skips the filtering and its allocation.
+        // set -- much the largest -- skips the filtering and its allocation.
         let filtered: Vec<TermId>;
         let focus = if stack.pairs.is_empty() {
             focus
@@ -442,12 +564,6 @@ impl Engine<'_> {
             }
             &filtered
         };
-        if stack.depth >= MAX_DEPTH {
-            return Err(Error::Recursion(format!(
-                "shapes nested more than {MAX_DEPTH} deep; a recursive shape spends one level per link of the data it walks, so a chain longer than {} is refused",
-                MAX_DEPTH - 2
-            )));
-        }
 
         let sets = match &shape.path {
             Some(p) => p.eval_sets(focus, self.data),
@@ -457,33 +573,13 @@ impl Engine<'_> {
         let mark = stack.pairs.len();
         stack.pairs.extend(focus.iter().map(|&n| (id, n)));
         stack.seen.extend(focus.iter().map(|&n| (id, n)));
-        stack.depth += 1;
-        let mut outcome = Ok(());
-        for constraint in &shape.constraints {
-            // `out` is whichever buffer this shape is filling, which for a
-            // nested shape is a scratch one rather than the report. Stopping
-            // early is still sound there, and is in fact the point: `conforms`
-            // and the nested-detail constraints only ever ask whether their
-            // buffer stayed empty, so once anything is in it the answer cannot
-            // change however many more results would have followed.
-            if self.enough(out) {
-                break;
-            }
-            outcome = self.eval(shape, constraint, &sets, out, stack, store);
-            if outcome.is_err() {
-                break;
-            }
-        }
-        stack.depth -= 1;
-        // Unwind both together. Removing by value is idempotent, which is what
-        // makes a repeated focus node — possible at the top level, where the
-        // filter above is skipped because nothing can have been visited yet —
-        // safe to push twice and drop once.
-        for pair in &stack.pairs[mark..] {
-            stack.seen.remove(pair);
-        }
-        stack.pairs.truncate(mark);
-        outcome
+        frames.push(Frame {
+            id,
+            sets,
+            next: 0,
+            mark,
+        });
+        Ok(())
     }
 
     /// Whether `node` conforms to the shape, producing no results.
