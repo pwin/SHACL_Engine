@@ -391,6 +391,7 @@ impl Shapes {
             vocab,
             shapes: Vec::new(),
             by_node: HashMap::new(),
+            pending: Vec::new(),
         }
         .run()
     }
@@ -404,6 +405,8 @@ struct Compiler<'a> {
     vocab: &'a Vocab,
     shapes: Vec<Shape>,
     by_node: HashMap<TermId, ShapeId>,
+    /// Shapes whose id exists but whose body is not compiled yet.
+    pending: Vec<TermId>,
 }
 
 /// Every predicate whose subject is necessarily a shape.
@@ -474,6 +477,9 @@ impl<'a> Compiler<'a> {
         for node in candidates {
             self.shape_id(node)?;
         }
+        // Roots are chosen by looking at compiled targets, so everything the
+        // queue holds has to be compiled first.
+        self.drain()?;
 
         let roots = (0..self.shapes.len() as u32)
             .map(ShapeId)
@@ -500,10 +506,26 @@ impl<'a> Compiler<'a> {
         self.shapes
             .push(Shape::placeholder(node, self.vocab.sh_Violation));
         self.by_node.insert(node, id);
-
-        let shape = self.compile_shape(node)?;
-        self.shapes[id.index()] = shape;
+        // Queued rather than compiled here. A constraint only needs the *id*
+        // of the shape it points at, and that is known the moment the
+        // placeholder is pushed, so nothing has to wait for the body.
+        self.pending.push(node);
         Ok(id)
+    }
+
+    /// Compiles every queued shape, including any queued while compiling.
+    ///
+    /// Compiling used to recurse per nested shape reference, so a shapes graph
+    /// nesting `sh:node` a few hundred deep overflowed the stack before
+    /// validation could apply any limit of its own. The queue is on the heap,
+    /// so the only bound now is how many shapes the graph declares.
+    fn drain(&mut self) -> Result<()> {
+        while let Some(node) = self.pending.pop() {
+            let id = self.by_node[&node];
+            let shape = self.compile_shape(node)?;
+            self.shapes[id.index()] = shape;
+        }
+        Ok(())
     }
 
     fn compile_shape(&mut self, node: TermId) -> Result<Shape> {

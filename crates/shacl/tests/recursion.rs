@@ -257,3 +257,38 @@ fn the_readme_quotes_the_real_recursion_error() {
         "README should say {depth} levels; update it when MAX_DEPTH moves"
     );
 }
+
+/// A shapes graph nested far deeper than the call stack still compiles.
+///
+/// Compiling used to recurse per nested shape reference, so a chain of
+/// `sh:node` a few hundred long overflowed the stack *before* validation could
+/// apply its own limit — the failure was a dead process, not an error. The
+/// queue is on the heap now, so compiling is bounded by how many shapes the
+/// graph declares rather than by frame size.
+///
+/// Validation still refuses to descend this far, and says so. That is the
+/// point: a limit you can catch, reached after compiling succeeded.
+#[test]
+fn a_deeply_nested_shapes_graph_compiles_then_reports_its_limit() {
+    const DEPTH: usize = 5_000;
+    let mut shapes = String::from(
+        "@prefix ex: <http://example.org/ns#> .\n\
+         @prefix sh: <http://www.w3.org/ns/shacl#> .\n\
+         ex:Root a sh:NodeShape ; sh:targetNode ex:a ; sh:node ex:S0 .\n",
+    );
+    for i in 0..DEPTH {
+        shapes.push_str(&format!(
+            "ex:S{i} a sh:NodeShape ; sh:node ex:S{} .\n",
+            i + 1
+        ));
+    }
+    shapes.push_str(&format!("ex:S{DEPTH} a sh:NodeShape .\n"));
+    let data = "@prefix ex: <http://example.org/ns#> .\nex:a ex:p 1 .\n";
+
+    match validate(data, &shapes) {
+        // Compilation got through all 5,000; validation stopped at its own
+        // ceiling, recoverably.
+        Err(shacl::Error::Recursion(m)) => assert!(m.contains("48"), "unexpected: {m}"),
+        other => panic!("expected a recursion error, got {other:?}"),
+    }
+}

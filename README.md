@@ -231,9 +231,9 @@ cheapest possible recursive shape, the process dies somewhere under 100 levels
 in a debug build and at about 410 in a release one, so 48 leaves roughly a
 factor of two in the tighter of the two.
 
-One limit remains uncounted: compiling a shapes graph recurses per nested
-shape reference, so a graph nesting `sh:node` some hundreds deep can overflow
-during compilation, before any of the above applies.
+Compiling a shapes graph is iterative too, so nesting `sh:node` thousands deep
+compiles and then meets the limit above as an error rather than overflowing
+before validation begins.
 
 ### Not implemented
 
