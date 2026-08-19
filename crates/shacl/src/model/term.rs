@@ -404,6 +404,34 @@ impl TermStore {
         self.lookup.get(&data).copied()
     }
 
+    /// Resolves a term this store rendered, whatever its kind.
+    ///
+    /// The single inverse of [`TermStore::to_oxrdf`], and the one a boundary
+    /// should call. [`TermStore::get_term`] is not that inverse: it refuses
+    /// blank nodes, because an externally-supplied label names nothing here,
+    /// and it refuses triple terms, whose components need resolving first.
+    /// Both refusals are correct for a term that arrived from outside and
+    /// wrong for one that left through `to_oxrdf` and came back.
+    ///
+    /// Keeping the two apart is what let a blank node handed back from a
+    /// SPARQL solution resolve to nothing, so a result lost its `sh:value`
+    /// without saying so. A triple term does the same thing today, which
+    /// `tests/roundtrip.rs` is what noticed.
+    pub fn resolve_rendered(&self, term: TermRef<'_>) -> Option<TermId> {
+        match term {
+            TermRef::BlankNode(b) => self.blank_node_from_output_label(b.as_str()),
+            TermRef::Triple(t) => {
+                // Components recurse, since any of them may itself be a blank
+                // node or a nested triple term.
+                let s = self.resolve_rendered(TermRef::from(t.subject.as_ref()))?;
+                let p = self.get_named_node(t.predicate.as_str())?;
+                let o = self.resolve_rendered(t.object.as_ref())?;
+                self.get_triple_term(s, p, o)
+            }
+            other => self.get_term(other),
+        }
+    }
+
     /// Resolves a blank node rendered by [`TermStore::to_oxrdf`] back to its
     /// handle, or `None` if this store never produced it.
     ///

@@ -173,18 +173,15 @@ impl<'a> QueryableDataset<'a> for &'a DataAdapter<'a> {
     }
 
     fn internalize_term(&self, term: Term) -> std::result::Result<TermId, Infallible> {
-        // A blank node the store rendered — a pre-bound focus node, or one
-        // handed back in a solution — resolves to the handle it already has.
-        // `get_term` cannot do this: it refuses blank nodes because an
-        // externally-supplied label names nothing here, which stays true.
-        if let Term::BlankNode(b) = &term
-            && let Some(id) = self.store.blank_node_from_output_label(b.as_str())
-        {
-            return Ok(id);
-        }
+        // Anything the store rendered resolves to the handle it already has —
+        // a pre-bound focus node, or a term handed back in a solution. That
+        // covers blank nodes and RDF 1.2 triple terms, neither of which
+        // `get_term` will resolve, and both of which reach here.
+        //
+        // Only a term the store never produced is parked in the side table.
         Ok(self
             .store
-            .get_term(term.as_ref())
+            .resolve_rendered(term.as_ref())
             .unwrap_or_else(|| self.intern_external(term)))
     }
 
@@ -856,13 +853,10 @@ pub fn to_term(t: TermId, store: &TermStore) -> Term {
 /// algebra. Without this the value resolves to nothing and `sh:value` is
 /// quietly absent.
 pub fn from_term(term: TermRef<'_>, store: &TermStore) -> Option<TermId> {
-    match term {
-        // A solution can carry a blank node — as the focus node it was bound
-        // to, or as a value read from the graph. Without this it resolves to
-        // nothing and the result loses its `sh:value` without saying so.
-        TermRef::BlankNode(b) => store.blank_node_from_output_label(b.as_str()),
-        _ => store.get_term(term),
-    }
+    // One inverse for every kind, rather than a match here that has to be kept
+    // in step with the renderer. Blank nodes and triple terms both need more
+    // than `get_term` offers, and both have been silently dropped before.
+    store.resolve_rendered(term)
 }
 
 #[cfg(test)]
