@@ -10,8 +10,27 @@
 //! top would not deliver, since the union's branches are evaluated
 //! independently before the join. `FILTER(bound($this))` likewise rules out
 //! textual substitution, because `bound(<iri>)` is not even legal syntax.
-//! SEP-0007 substitution, which the evaluator implements natively, has exactly
-//! the semantics SHACL asks for.
+//!
+//! There are two mechanisms here, and the split is deliberate rather than
+//! historical.
+//!
+//! Ground terms are substituted into the algebra by [`substitute`], which
+//! replaces the variable wherever it occurs. The evaluator offers a
+//! substitution of its own, and it is *not* equivalent: it binds a variable in
+//! the input tuple, which reaches only variables the outer projection
+//! produces, and does not reach inside a sub-`SELECT` — a subquery is
+//! evaluated on its own and joined afterwards. A constraint whose `$this`
+//! appears only inside a subquery is refused outright by the evaluator, and
+//! would give the wrong answer if the projection were widened to let it
+//! through. `native_substitution_and_the_algebra_rewrite_agree_on_a_subquery`
+//! holds that difference in place, because the duplication looks gratuitous
+//! until you try to remove it.
+//!
+//! Blank nodes take the evaluator's substitution instead, for the opposite
+//! reason: a blank node written into a pattern is a variable rather than a
+//! constant, so it cannot be substituted into the algebra at all — doing so
+//! unpins the pattern and matches everything, which is how N focus nodes once
+//! produced N-squared results.
 
 use std::cell::RefCell;
 use std::convert::Infallible;
@@ -885,6 +904,55 @@ mod tests {
         ex:a ex:p ex:b ; ex:q 1 .
         ex:b ex:p ex:c .
         ex:x ex:p ex:y .";
+
+    /// Does the evaluator's own substitution reach inside a sub-SELECT?
+    ///
+    /// SHACL pre-binding is defined as *substitution*, which replaces the
+    /// variable everywhere it occurs, including inside a subquery. An initial
+    /// binding is a different thing: a subquery is evaluated on its own and
+    /// then joined, so an outer binding need not reach in.
+    ///
+    /// The answer decides whether the hand-rolled algebra rewrite in this
+    /// module can be deleted in favour of the evaluator's substitution, so it
+    /// is asserted rather than assumed.
+    #[test]
+    fn native_substitution_and_the_algebra_rewrite_agree_on_a_subquery() {
+        let (mut store, _, g) = fixture(DATA);
+        let a = store.named_node("http://ex/a");
+        let this = to_term(a, &store);
+
+        // `$this` appears only inside the subquery. Substitution pins it to
+        // ex:a, giving one row; leaving it free gives every ex:p statement.
+        let text = "SELECT ?v WHERE { { SELECT ?v WHERE { $this <http://ex/p> ?v } } }";
+        let q = parse_query("", text).unwrap();
+
+        // What this module does today.
+        let ours = run(&q, &[("this", this.clone())], &g, &store).unwrap();
+
+        // What the evaluator's own substitution does, with no rewrite.
+        let adapter = DataAdapter::new(&g, &store);
+        let evaluator = QueryEvaluator::new();
+        let prepared = evaluator
+            .prepare(&q)
+            .substitute_variable(Variable::new_unchecked("this"), this);
+        let native = match prepared.execute(&adapter) {
+            Ok(QueryResults::Solutions(sols)) => sols.count(),
+            Ok(_) => 0,
+            // Rejecting the variable outright is also an answer: it means the
+            // rewrite cannot simply be handed over.
+            Err(e) => {
+                eprintln!("native substitution refused: {e}");
+                usize::MAX
+            }
+        };
+
+        assert_eq!(ours.len(), 1, "substitution should pin $this to ex:a");
+        assert_eq!(
+            native,
+            usize::MAX,
+            "the evaluator's substitution is expected to refuse this query; if it              has learned to handle a variable outside the outer projection, check              whether it reaches *into* the subquery before deleting the rewrite              above -- binding it outside and joining is a different answer"
+        );
+    }
 
     #[test]
     fn evaluates_a_basic_pattern_against_the_interned_graph() {
