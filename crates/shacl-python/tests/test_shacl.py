@@ -325,10 +325,23 @@ def test_stubs_match_the_module():
     for cls, method, expected in [
         ("Report", "serialize", {"format": "turtle"}),
         ("Shapes", "from_text", {"format": "turtle", "base": "http://example.org/shapes"}),
-        ("Shapes", "validate_text", {"format": "turtle", "base": "http://example.org/data", "inference": "none"}),
+        (
+            "Shapes",
+            "validate_text",
+            {
+                "format": "turtle",
+                "base": "http://example.org/data",
+                "inference": "none",
+                "max_results": None,
+            },
+        ),
         ("Shapes", "from_turtle", {"base": "http://example.org/shapes"}),
-        ("Shapes", "validate_turtle", {"base": "http://example.org/data", "inference": "none"}),
-        ("Shapes", "validate_file", {"inference": "none"}),
+        (
+            "Shapes",
+            "validate_turtle",
+            {"base": "http://example.org/data", "inference": "none", "max_results": None},
+        ),
+        ("Shapes", "validate_file", {"inference": "none", "max_results": None}),
     ]:
         node = next(
             n
@@ -478,3 +491,177 @@ def test_an_unknown_inference_mode_is_rejected():
     shapes = shacl.Shapes.from_turtle(RULE_SHAPES)
     with pytest.raises(ValueError, match="rules-iterated"):
         shapes.validate_turtle(RULE_DATA, inference="magic")
+
+
+# ---------------------------------------------------------------------------
+# What a caller outside this crate needs from a result.
+#
+# Each of these covers a field that used to make a result unusable to an
+# embedder: something identifying the shape, a path that survives leaving the
+# process, a value it can compare, and a way to stop before a systematically
+# failing shape produces a report nobody can hold in memory.
+# ---------------------------------------------------------------------------
+NESTED_SHAPES = """
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:   <http://ex/> .
+
+ex:NamedShape a sh:NodeShape ;
+  sh:targetClass ex:Thing ;
+  sh:property [ sh:path ex:code ; sh:minCount 1 ] .
+
+ex:PathShape a sh:NodeShape ;
+  sh:targetClass ex:Thing ;
+  sh:property [
+    sh:path [ sh:oneOrMorePath rdfs:subClassOf ] ;
+    sh:disjoint ex:notThis ;
+  ] .
+
+ex:ValueShape a sh:NodeShape ;
+  sh:targetClass ex:Thing ;
+  sh:property [ sh:path ex:count ; sh:datatype xsd:integer ] .
+"""
+
+NESTED_DATA = """
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex:   <http://ex/> .
+ex:a a ex:Thing ; rdfs:subClassOf ex:b ; ex:notThis ex:b ; ex:count "twelve" .
+ex:c a ex:Thing ; ex:count "also not a number" .
+"""
+
+
+def nested_report():
+    return shacl.Shapes.from_turtle(NESTED_SHAPES).validate_turtle(NESTED_DATA)
+
+
+def test_root_shape_names_the_enclosing_shape_a_caller_can_look_up():
+    """`source_shape` for a constraint inside `sh:property [ ... ]` is a blank
+    node minted here, so it matches nothing in a caller's own copy of the
+    shapes graph. Without `root_shape`, every such result arrives
+    unattributable to whatever the caller keys its metadata by."""
+    results = [r for r in nested_report().results if r.component == "MinCountConstraintComponent"]
+    assert results
+    for r in results:
+        assert r.source_shape.startswith("_:"), "expected the nested property shape"
+        assert r.root_shape == "<http://ex/NamedShape>"
+
+
+def test_root_shape_equals_source_shape_for_a_constraint_on_a_named_shape():
+    shapes = shacl.Shapes.from_turtle("""
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://ex/> .
+        ex:S a sh:NodeShape ; sh:targetClass ex:T ; sh:closed true .
+    """)
+    report = shapes.validate_turtle("""
+        @prefix ex: <http://ex/> .
+        ex:x a ex:T ; ex:stray "v" .
+    """)
+    assert report.results
+    for r in report.results:
+        assert r.root_shape == r.source_shape == "<http://ex/S>"
+
+
+def test_path_is_a_property_path_expression_not_a_blank_node():
+    """A compound `sh:path` is a blank node structure. Reporting its label
+    would give the caller a string that is local to this process and different
+    on the next run -- unusable as an identifier and actively harmful in a
+    key."""
+    results = [r for r in nested_report().results if r.component == "DisjointConstraintComponent"]
+    assert results
+    for r in results:
+        assert not r.path.startswith("_:")
+        # Parenthesised: ^(a/b) and (^a)/b are different paths, so the
+        # renderer groups anything that is not a bare predicate.
+        assert r.path == "(<http://www.w3.org/2000/01/rdf-schema#subClassOf>)+"
+
+
+def test_simple_paths_still_render_as_the_predicate():
+    results = [r for r in nested_report().results if r.component == "MinCountConstraintComponent"]
+    assert results
+    assert all(r.path == "<http://ex/code>" for r in results)
+
+
+def test_value_plain_gives_the_literal_without_its_syntax():
+    """`value` is the term and identifies it; `value_plain` is what it says.
+    Recovering one from the other by string surgery works until a literal
+    contains a quotation mark."""
+    results = [r for r in nested_report().results if r.component == "DatatypeConstraintComponent"]
+    assert results
+    by_lexical = {r.value_plain for r in results}
+    assert "twelve" in by_lexical
+    for r in results:
+        assert r.value.startswith('"')
+        assert not r.value_plain.startswith('"')
+
+
+def test_value_plain_strips_the_syntax_from_an_iri_too():
+    """Not literals-only: a caller wants one field it can use whatever the
+    term turns out to be, or it is back to string surgery for half of them."""
+    results = [r for r in nested_report().results if r.component == "DisjointConstraintComponent"]
+    assert results
+    for r in results:
+        assert r.value == "<http://ex/b>"
+        assert r.value_plain == "http://ex/b"
+
+
+def test_max_results_stops_the_run():
+    """A real early exit, so it bounds the memory a run costs and not just its
+    output. That is the point on a graph big enough for one failing shape to
+    produce results in the hundreds of thousands."""
+    shapes = shacl.Shapes.from_turtle("""
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://ex/> .
+        ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+          sh:property [ sh:path ex:p ; sh:minCount 1 ] .
+    """)
+    data = "@prefix ex: <http://ex/> .\n" + "\n".join(
+        f"ex:n{i} a ex:T ." for i in range(50)
+    )
+    assert len(shapes.validate_turtle(data).results) == 50
+    for cap in (1, 5, 20):
+        capped = shapes.validate_turtle(data, max_results=cap)
+        assert len(capped.results) == cap
+        assert capped.conforms is False
+
+
+def test_max_results_counts_conformance_blocking_results_only():
+    """The cap counts what breaks conformance, matching the CLI. Counting
+    every result would let a run stop on an `sh:Info` and report
+    `conforms = True` with a `sh:Violation` sitting unexamined further along:
+    shapes are evaluated in compilation order, which says nothing about what
+    is in the graph."""
+    shapes = shacl.Shapes.from_turtle("""
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://ex/> .
+        ex:Info a sh:NodeShape ; sh:targetClass ex:T ;
+          sh:property [ sh:path ex:a ; sh:minCount 1 ; sh:severity sh:Info ] .
+        ex:Blocking a sh:NodeShape ; sh:targetClass ex:T ;
+          sh:property [ sh:path ex:b ; sh:minCount 1 ] .
+    """)
+    data = "@prefix ex: <http://ex/> .\n" + "\n".join(f"ex:n{i} a ex:T ." for i in range(10))
+    capped = shacl.Shapes.from_turtle("""
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://ex/> .
+        ex:Info a sh:NodeShape ; sh:targetClass ex:T ;
+          sh:property [ sh:path ex:a ; sh:minCount 1 ; sh:severity sh:Info ] .
+        ex:Blocking a sh:NodeShape ; sh:targetClass ex:T ;
+          sh:property [ sh:path ex:b ; sh:minCount 1 ] .
+    """).validate_turtle(data, max_results=3)
+    blocking = [r for r in capped.results if r.severity == "Violation"]
+    assert len(blocking) == 3, "the cap counts blocking results"
+    assert capped.conforms is False, "a cap must never turn a failing graph into a passing one"
+    del shapes
+
+
+def test_max_results_none_is_the_default_and_reports_everything():
+    shapes = shacl.Shapes.from_turtle("""
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://ex/> .
+        ex:S a sh:NodeShape ; sh:targetClass ex:T ;
+          sh:property [ sh:path ex:p ; sh:minCount 1 ] .
+    """)
+    data = "@prefix ex: <http://ex/> .\n" + "\n".join(f"ex:n{i} a ex:T ." for i in range(30))
+    assert len(shapes.validate_turtle(data).results) == 30
+    assert len(shapes.validate_turtle(data, max_results=None).results) == 30

@@ -18,12 +18,26 @@ class Result:
 
     # The node the violation is about, in N-Triples syntax.
     focus_node: str
-    # The offending value, if the constraint named one.
+    # The offending value, if the constraint named one, in N-Triples syntax.
     value: str | None
-    # The `sh:resultPath`, if the shape had one.
+    # The offending value with its RDF syntax removed: the lexical form of a
+    # literal, the IRI of a named node, the label of a blank node. "12x" where
+    # `value` is '"12x"^^<http://www.w3.org/2001/XMLSchema#integer>'. Both are
+    # here because `value` identifies the term and `value_plain` says what it
+    # holds, which is what a report prints and what a de-duplication key wants.
+    value_plain: str | None
+    # The `sh:resultPath` in SPARQL property-path syntax, e.g. "<http://ex/p>"
+    # or "(<http://ex/p>)+" — rendered, because the path *node* is a blank
+    # node for anything but a bare predicate.
     path: str | None
-    # The shape that raised it.
+    # The shape that raised it. A constraint inside `sh:property [ ... ]`
+    # reports the nested property shape, which is a blank node and so cannot
+    # be looked up in a separately-parsed copy of the shapes graph.
     source_shape: str | None
+    # The nearest enclosing shape that has an IRI, found by walking
+    # `sh:property` upwards. This is the one a registry keyed by shape IRI can
+    # match. Equal to `source_shape` when the constraint sits on a named shape.
+    root_shape: str | None
     # Local name of the constraint component, e.g. "MinCountConstraintComponent".
     component: str
     # The same as a full IRI, which is what distinguishes two custom
@@ -90,8 +104,20 @@ class Shapes:
         """Compiles a shapes graph from text in any supported format."""
         ...
 
-    def validate_file(self, path: str, inference: str = "none") -> Report:
-        """Validates a data graph read from a file."""
+    def validate_file(
+        self,
+        path: str,
+        inference: str = "none",
+        max_results: int | None = None,
+    ) -> Report:
+        """Validates a data graph read from a file.
+
+        `max_results` stops the run once that many conformance-blocking
+        results exist. It is a real early exit rather than a truncation, so it
+        bounds the memory a run costs as well as its time — which is the
+        reason to want it on a graph large enough that one systematically
+        failing shape can produce results in the hundreds of thousands.
+        """
         ...
 
     def validate_turtle(
@@ -99,8 +125,16 @@ class Shapes:
         text: str,
         base: str = "http://example.org/data",
         inference: str = "none",
+        max_results: int | None = None,
     ) -> Report:
-        """Validates a data graph held in memory as Turtle."""
+        """Validates a data graph held in memory as Turtle.
+
+        `max_results` stops the run once that many conformance-blocking
+        results exist. It is a real early exit rather than a truncation, so it
+        bounds the memory a run costs as well as its time — which is the
+        reason to want it on a graph large enough that one systematically
+        failing shape can produce results in the hundreds of thousands.
+        """
         ...
 
     def validate_text(
@@ -109,6 +143,7 @@ class Shapes:
         format: str = "turtle",
         base: str = "http://example.org/data",
         inference: str = "none",
+        max_results: int | None = None,
     ) -> Report:
         """Validates a data graph held in memory, in any supported format.
 
@@ -133,6 +168,7 @@ def validate(
     data_path: str,
     shapes_path: str | None = None,
     inference: str = "none",
+    max_results: int | None = None,
 ) -> Report:
     """Validates `data_path` against `shapes_path` in one call.
 

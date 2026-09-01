@@ -96,12 +96,46 @@ impl Inference {
 pub struct Result {
     /// The node the violation is about, in N-Triples syntax.
     pub focus_node: String,
-    /// The offending value, if the constraint named one.
+    /// The offending value, if the constraint named one, in N-Triples syntax.
     pub value: Option<String>,
-    /// The `sh:resultPath`, if the shape had one.
+    /// The offending value with its RDF syntax removed: the lexical form of a
+    /// literal, the IRI of a named node, the label of a blank node. `12x`
+    /// where `value` is `"12x"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+    /// and `http://ex/b` where `value` is `<http://ex/b>`.
+    ///
+    /// Both are here because they answer different questions. `value` is the
+    /// term and is what identifies it; `value_plain` is what the value says,
+    /// and is what a report prints and what a de-duplication key wants.
+    /// Recovering one from the other by string surgery is the kind of thing
+    /// that works until a literal contains a quotation mark.
+    pub value_plain: Option<String>,
+    /// The `sh:resultPath`, if the shape had one, in SPARQL property-path
+    /// syntax: `<http://...#p>`, or `(<http://...#p>)+` for a compound path.
+    ///
+    /// Rendered rather than reported as the `sh:path` node itself, because
+    /// that node is a blank node for every path that is not a bare
+    /// predicate — and a blank node label says nothing to a caller holding
+    /// its own copy of the shapes graph, nor to the same caller on the next
+    /// run.
     pub path: Option<String>,
     /// The shape that raised it.
+    ///
+    /// For a constraint written inside `sh:property [ ... ]` this is the
+    /// nested property shape, which is a blank node. Blank node labels are
+    /// local to whoever minted them, so this one cannot be looked up in a
+    /// separately-parsed copy of the shapes graph — use `root_shape` for
+    /// that.
     pub source_shape: Option<String>,
+    /// The nearest enclosing shape that has an IRI, found by walking
+    /// `sh:property` upwards from `source_shape`.
+    ///
+    /// This is the shape a caller can actually identify. A registry keyed by
+    /// shape IRI — the usual way of attaching a check id, a category or
+    /// remediation text to a finding — has nothing to match a blank node
+    /// against, so without this every result from a nested property shape
+    /// arrives unattributable. Equal to `source_shape` when the constraint
+    /// sits directly on a named shape.
+    pub root_shape: Option<String>,
     /// Local name of the constraint component, e.g. `MinCountConstraintComponent`.
     pub component: String,
     /// The same as a full IRI, which is the only way to tell two custom
@@ -289,7 +323,7 @@ impl Shapes {
     /// because it changes what the report says — a `sh:closed` shape starts
     /// seeing inferred predicates — so it should be asked for rather than
     /// assumed.
-    #[pyo3(signature = (text, format = "turtle", base = "http://example.org/data", inference = "none"))]
+    #[pyo3(signature = (text, format = "turtle", base = "http://example.org/data", inference = "none", max_results = None))]
     fn validate_text(
         &self,
         py: Python<'_>,
@@ -297,6 +331,7 @@ impl Shapes {
         format: &str,
         base: &str,
         inference: &str,
+        max_results: Option<usize>,
     ) -> PyResult<Report> {
         let fmt = format_by_name(format)?;
         let inf = Inference::parse(inference)?;
@@ -307,7 +342,7 @@ impl Shapes {
                 .map_err(to_py_err)?;
             {
                 let data = inf.apply(b.build(), self, &mut store, &self.vocab)?;
-                self.run(&mut store, &data)
+                self.run(&mut store, &data, max_results)
             }
         })
     }
@@ -316,27 +351,34 @@ impl Shapes {
     ///
     /// `inference` materialises entailed triples into the data graph first:
     /// `"none"` (the default) or `"rdfs"`. See `Shapes.validate_text`.
-    #[pyo3(signature = (path, inference = "none"))]
-    fn validate_file(&self, py: Python<'_>, path: PathBuf, inference: &str) -> PyResult<Report> {
+    #[pyo3(signature = (path, inference = "none", max_results = None))]
+    fn validate_file(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        inference: &str,
+        max_results: Option<usize>,
+    ) -> PyResult<Report> {
         let inf = Inference::parse(inference)?;
         py.detach(|| {
             let mut store = self.store.clone();
             let data = loader::load_file(&path, scope::DATA, &mut store).map_err(to_py_err)?;
             {
                 let data = inf.apply(data, self, &mut store, &self.vocab)?;
-                self.run(&mut store, &data)
+                self.run(&mut store, &data, max_results)
             }
         })
     }
 
     /// Validates a data graph held in memory as Turtle.
-    #[pyo3(signature = (text, base = "http://example.org/data", inference = "none"))]
+    #[pyo3(signature = (text, base = "http://example.org/data", inference = "none", max_results = None))]
     fn validate_turtle(
         &self,
         py: Python<'_>,
         text: &str,
         base: &str,
         inference: &str,
+        max_results: Option<usize>,
     ) -> PyResult<Report> {
         let inf = Inference::parse(inference)?;
         py.detach(|| {
@@ -353,7 +395,7 @@ impl Shapes {
             .map_err(to_py_err)?;
             {
                 let data = inf.apply(b.build(), self, &mut store, &self.vocab)?;
-                self.run(&mut store, &data)
+                self.run(&mut store, &data, max_results)
             }
         })
     }
@@ -369,11 +411,37 @@ impl Shapes {
 }
 
 impl Shapes {
-    fn run(&self, store: &mut TermStore, data: &Graph) -> PyResult<Report> {
+    fn run(
+        &self,
+        store: &mut TermStore,
+        data: &Graph,
+        max_results: Option<usize>,
+    ) -> PyResult<Report> {
         let vocab = &self.vocab;
-        let report =
-            engine::validate::validate_in(data, &self.compiled, &self.shapes_graph, store, vocab)
-                .map_err(to_py_err)?;
+        // `max_results` is a real early exit in the engine, not a truncation
+        // of a finished report, so it also caps the memory a run costs. That
+        // is the point of exposing it here: a systematically failing shape
+        // over a large graph can produce results in the hundreds of
+        // thousands, and every one is materialised, serialised and handed to
+        // the caller before the caller can say it only wanted a sample.
+        //
+        // The severities counted towards the cap are the ones that break
+        // conformance, so a run cannot stop on an `sh:Info` and report
+        // `conforms = true` with a `sh:Violation` left unexamined further
+        // along.
+        let options = engine::validate::Options {
+            max_results,
+            blocking: Some(vec![vocab.sh_Violation]),
+        };
+        let report = engine::validate::validate_in_with(
+            data,
+            &self.compiled,
+            &self.shapes_graph,
+            store,
+            vocab,
+            options,
+        )
+        .map_err(to_py_err)?;
 
         let local = |t: engine::TermId| -> String {
             store
@@ -390,6 +458,37 @@ impl Shapes {
                 .unwrap_or_else(|| store.to_oxrdf(t).to_string())
         };
 
+        // The nearest enclosing shape with an IRI. A constraint written inside
+        // `sh:property [ ... ]` reports the nested blank node, which no caller
+        // can match against its own copy of the shapes graph; the shape that
+        // owns it is what a registry is keyed by. Bounded rather than looped
+        // to termination: a malformed shapes graph can contain an
+        // `sh:property` cycle, and nesting is written by hand, so a handful of
+        // levels is far more than anyone authors.
+        let root_of = |mut node: engine::TermId| -> Option<engine::TermId> {
+            for _ in 0..16 {
+                if store.iri(node).is_some() {
+                    return Some(node);
+                }
+                node = self.shapes_graph.subjects(vocab.sh_property, node).next()?;
+            }
+            None
+        };
+
+        // `sh:resultPath` as a path expression rather than as the path node.
+        // A bare predicate is already a usable term; anything else is a blank
+        // node, and `Path::to_sparql` is what the engine already uses to
+        // substitute `$PATH` into a SPARQL constraint.
+        let path_of = |node: engine::TermId| -> String {
+            match engine::path::Path::compile(node, &self.shapes_graph, store, vocab) {
+                Ok(path) => path.to_sparql(store),
+                // An uncompilable path is malformed shapes, not a validation
+                // outcome; falling back to the term keeps the result rather
+                // than losing it.
+                Err(_) => store.to_oxrdf(node).to_string(),
+            }
+        };
+
         let results = report
             .results
             .iter()
@@ -403,8 +502,13 @@ impl Shapes {
                 Result {
                     focus_node: term(r.focus_node),
                     value: r.value.map(term),
-                    path: r.path.map(term),
+                    value_plain: r
+                        .value
+                        .and_then(|v| store.lexical_form(v))
+                        .map(str::to_string),
+                    path: r.path.map(path_of),
                     source_shape: r.source_shape.map(term),
+                    root_shape: r.source_shape.and_then(root_of).map(term),
                     component: local(r.source_constraint_component),
                     component_iri: full(r.source_constraint_component),
                     severity: local(r.severity),
@@ -458,18 +562,19 @@ fn format_by_name(name: &str) -> PyResult<engine::report::RdfFormat> {
 /// directly when the same shapes are reused, which is the case worth
 /// optimising for.
 #[pyfunction]
-#[pyo3(signature = (data_path, shapes_path = None, inference = "none"))]
+#[pyo3(signature = (data_path, shapes_path = None, inference = "none", max_results = None))]
 fn validate(
     py: Python<'_>,
     data_path: PathBuf,
     shapes_path: Option<PathBuf>,
     inference: &str,
+    max_results: Option<usize>,
 ) -> PyResult<Report> {
     // A self-describing document carries its own shapes, which is the
     // convention the CLI follows too.
     let shapes_path = shapes_path.unwrap_or_else(|| data_path.clone());
     let shapes = Shapes::from_file(py, shapes_path)?;
-    shapes.validate_file(py, data_path, inference)
+    shapes.validate_file(py, data_path, inference, max_results)
 }
 
 /// `gil_used = false` declares the module safe for free-threaded CPython.

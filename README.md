@@ -444,6 +444,43 @@ if not report:
         print(r.severity, r.component, r.focus_node, r.value)
 ```
 
+### What a result carries
+
+Reading the fields is meant to be enough; a caller should not have to parse
+the report graph back to find out what happened, nor do string surgery on
+what it gets.
+
+| | |
+| --- | --- |
+| `focus_node`, `value`, `path` | The result, in N-Triples syntax — except `path`, which is SPARQL property-path syntax (`<http://ex/p>`, or `(<http://ex/p>)+`) because a compound `sh:path` is a blank node structure and its label would mean nothing outside this process. |
+| `value_plain` | The value with the syntax removed: a literal's lexical form, a named node's IRI, a blank node's label. What a report prints, and what a de-duplication key wants. |
+| `source_shape` | The shape that raised the result. For a constraint written inside `sh:property [ ... ]` this is the nested property shape, which is a blank node. |
+| `root_shape` | The nearest enclosing shape that has an IRI. This is the one a caller can look up: a registry keyed by shape IRI — the usual way to attach a check id or remediation text to a finding — has nothing to match a blank node against. Equal to `source_shape` for a constraint on a named shape. |
+| `component`, `component_iri`, `severity`, `severity_iri` | Local name and full IRI of each. |
+| `message`, `messages` | `messages` holds all of them, which matters when a shape carries one per language. |
+
+### Stopping early on a large graph
+
+`max_results` abandons validation once that many conformance-blocking results
+exist:
+
+```python
+report = shapes.validate_file("data.ttl", max_results=100)
+```
+
+It is a real early exit rather than a truncation of a finished report, so it
+bounds the memory a run costs as well as its time. That is the reason to want
+it: one systematically failing shape over a large graph can produce results in
+the hundreds of thousands, and every one is built, held and handed over before
+the caller can say it only wanted a sample.
+
+The severities counted are the ones that break conformance, matching
+`--max-results` in the CLI. Counting every result instead would let a run stop
+on an `sh:Info` and report `conforms = True` with an `sh:Violation` left
+unexamined further along — shapes are evaluated in whatever order they
+compiled in, so which kind is met first says nothing about what is in the
+graph.
+
 See [crates/shacl-python/README.md](crates/shacl-python/README.md). To work on
 the bindings themselves, build them in place with
 `pip install maturin && cd crates/shacl-python && maturin develop --release`.
