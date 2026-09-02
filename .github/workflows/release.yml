@@ -250,7 +250,11 @@ jobs:
       # package whose payload is a 3 MB binary nobody can read.
       id-token: write
     steps:
+      # Full history and tags: the guard below compares this tree against the
+      # tag for its version, which a shallow clone cannot see.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -274,36 +278,58 @@ jobs:
       - name: Install wasm-pack
         run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
-      # A tag, for the same reason PyPI needs one: the version published comes
-      # from Cargo.toml, and only a tag ties that number to a commit anyone can
-      # find again. npm has no disposable rehearsal registry to relax this for.
+      # The version published comes from Cargo.toml, and npm has no disposable
+      # rehearsal registry, so it must tie to a commit anyone can find again.
+      #
+      # That used to be spelled "the ref must be a tag", which is a proxy for
+      # the real rule and turned out to be a trap: a dispatch runs the workflow
+      # file *from the ref it is given*, so any fix to this job could only ever
+      # be used by a tag cut after the fix — and the tag needing to be
+      # published is always older than that. Repairing npm publishing was
+      # impossible without moving a tag that had already been released.
+      #
+      # So the rule is stated directly instead: a tag for this version must
+      # exist, and everything that ends up in the packages must be identical to
+      # it. CI configuration may differ, because it is not shipped.
       - name: Check the ref suits a publish
         run: |
-          case "$GITHUB_REF" in
-            refs/tags/*) echo "publishing $GITHUB_REF_NAME to npm" ;;
-            *) echo "::error::Publishing to npm needs a tag, not $GITHUB_REF_NAME"; exit 1 ;;
-          esac
+          VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          TAG="v$VERSION"
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Cargo.toml says $VERSION but there is no tag $TAG"
+            exit 1
+          fi
+          if ! git diff --quiet "$TAG" HEAD -- crates Cargo.toml Cargo.lock; then
+            echo "::error::What this ref would publish differs from $TAG:"
+            git diff --stat "$TAG" HEAD -- crates Cargo.toml Cargo.lock
+            exit 1
+          fi
+          echo "publishing $VERSION; the shippable tree matches $TAG"
 
       - name: Build both packages
         run: node crates/shacl-wasm/build.mjs
 
-      # An npm automation token, which is exempt from the account's 2FA
-      # requirement — an ordinary publish token is not, and fails here with
-      # `EOTP` asking for a code no CI can supply.
+      # Trusted publishing: npm exchanges the OIDC token minted by the
+      # `id-token: write` permission above for publish rights. There is
+      # deliberately no `env:` block — no stored credential to leak, to rotate,
+      # or to quietly stop working.
       #
-      # Trusted publishing (OIDC) would be better: no stored credential at all,
-      # and the 2FA question disappears rather than being bypassed. It needs a
-      # trusted publisher configured on npm *per package*, which is why this
-      # still uses the token — switching before that exists would fail every
-      # publish. The `npm@latest` step above is already in place for it, since
-      # OIDC needs npm 11.5.1 and Node 20 ships npm 10.
+      # It replaces an automation token that did exactly that. The token was
+      # stored on 2026-08-14 and published 0.1.10 that day; by 0.1.12 it was
+      # answering `E404 Not Found - PUT`, which is how the registry says "no
+      # write access" without revealing whether a package exists — so a dead
+      # credential reads like a missing package. npm is separately restricting
+      # tokens that bypass 2FA for direct publishing, which this was.
+      #
+      # This needs a trusted publisher configured on npmjs.com for *each*
+      # package (repository `pwin/SHACL_Engine`, workflow `release.yml`).
+      # Without one npm looks for a token, finds none, and stops with
+      # `ENEEDAUTH` rather than anything mentioning OIDC.
       #
       # `--access public` is explicit rather than relied upon: these names are
       # unscoped and so public by default, but the flag means a later move to a
       # scope does not silently publish a private package instead.
       - name: Publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in pkg-bundler pkg-node; do
             echo "=== $dir ==="
