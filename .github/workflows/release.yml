@@ -275,8 +275,27 @@ jobs:
         run: |
           npm install -g npm@11
           npm --version
+      # `curl … | sh` takes its exit status from `sh`, not from `curl`. When the
+      # download failed — `curl: (35) Recv failure: Connection reset by peer`,
+      # which happened once — curl wrote nothing, `sh` read empty input and
+      # exited 0, so this step passed with wasm-pack not installed and the
+      # failure surfaced two steps later as `ENOENT: spawnSync wasm-pack`.
+      #
+      # `pipefail` makes the download's failure the step's failure, the retries
+      # cover it being transient, and the version check refuses to continue on
+      # anything that got this far without producing a usable binary.
       - name: Install wasm-pack
-        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3; do
+            if curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh; then
+              break
+            fi
+            echo "wasm-pack install attempt $attempt failed"
+            [ "$attempt" = 3 ] && exit 1
+            sleep 5
+          done
+          wasm-pack --version
 
       # The version published comes from Cargo.toml, and npm has no disposable
       # rehearsal registry, so it must tie to a commit anyone can find again.
