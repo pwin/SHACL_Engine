@@ -111,7 +111,7 @@ console.log('\n== wasm32 hazard: the clock (SPARQL NOW()) ==');
   `;
   const data = '@prefix ex: <http://example.org/> . ex:x a ex:T ; ex:p 1 .';
   try {
-    const r = validateTurtle(shapes, data, BASE);
+    const r = validateTurtle(data, shapes, BASE);
     check('NOW() evaluates instead of panicking', r.length, 1);
   } catch (e) {
     failures++;
@@ -208,6 +208,38 @@ console.log('\n== SHACL-AF rules through the WASM API ==');
   check('an unknown mode is an error, not a silent none', threw, true);
 }
 
+// --------------------------------------------- one-shot argument order
+//
+// The one-shot took (shapes, data) until 0.2.0 and now takes (data, shapes),
+// matching the Python binding, the CLI and the Rust API. Getting it backwards
+// was a silent fault, not a loud one: the data compiled as a shapes graph,
+// declared no shapes, and validating against no shapes conforms — so the
+// caller was told the graph was valid when nothing had been checked. These
+// pin both halves: the new order works, and the old order fails loudly.
+{
+  console.log('\n== one-shot argument order ==');
+  const shapes = `
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix ex: <http://example.org/> .
+    ex:S a sh:NodeShape ; sh:targetClass ex:Person ;
+      sh:property [ sh:path ex:name ; sh:maxCount 1 ] .
+  `;
+  const data = '@prefix ex: <http://example.org/> . ex:a a ex:Person ; ex:name "A", "B" .';
+
+  check('(data, shapes) finds the violation', validateTurtle(data, shapes, BASE).length, 1);
+
+  let threw = false;
+  try {
+    validateTurtle(shapes, data, BASE);
+  } catch (e) {
+    threw = String(e).includes('declares no shapes');
+  }
+  check('(shapes, data) throws rather than reporting conformance', threw, true);
+
+  // A self-describing document carries its own shapes, as it does for the
+  // Python binding and the CLI.
+  check('shapes may be omitted', validateTurtle(shapes + data, null, BASE).length, 1);
+}
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);

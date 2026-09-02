@@ -174,6 +174,15 @@ def validate(
 
     Use `Shapes` directly when the same shapes are reused — compiling once is
     most of the benefit.
+
+    `shapes_path` may be omitted for a self-describing document that carries
+    its own shapes.
+
+    Raises `ValueError` if the shapes graph declares no shapes. Validating
+    against no shapes conforms, so without this the call would report the data
+    valid without having checked anything — which is what passing these two
+    arguments the wrong way round looks like. `Shapes.from_file` does not
+    raise; check `len()` there instead.
     """
     ...
 

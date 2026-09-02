@@ -401,6 +401,11 @@ impl Shapes {
     }
 
     /// The number of compiled shapes.
+    ///
+    /// Zero means the shapes graph parsed but declared nothing the engine
+    /// recognises as a shape, which matters because validating against no
+    /// shapes conforms. `shapeCount` on the JavaScript `Validator` is the same
+    /// number.
     fn __len__(&self) -> usize {
         self.compiled.len()
     }
@@ -574,6 +579,19 @@ fn validate(
     // convention the CLI follows too.
     let shapes_path = shapes_path.unwrap_or_else(|| data_path.clone());
     let shapes = Shapes::from_file(py, shapes_path)?;
+    // Validating against no shapes conforms, so a shapes graph that declares
+    // none would report the data valid without having checked anything. That
+    // is what transposing these two arguments looks like, and a validator
+    // saying "fine" is the worst possible way to report it.
+    if shapes.__len__() == 0 {
+        return Err(PyValueError::new_err(
+            "the shapes graph declares no shapes, so this would report that \
+             the data conforms without having checked anything. Note the \
+             argument order is validate(data, shapes). To validate against an \
+             empty shapes graph deliberately, use Shapes.from_file and check \
+             len() yourself.",
+        ));
+    }
     shapes.validate_file(py, data_path, inference, max_results)
 }
 

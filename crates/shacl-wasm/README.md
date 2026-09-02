@@ -92,8 +92,23 @@ validator.validateText(text, format, base, inference)     // inference: "none" (
 validator.shapeCount                                      // shapes compiled
 
 const { validateTurtle } = require('./pkg-node/shacl_wasm.js');
-validateTurtle(shapesTurtle, dataTurtle, base);           // one-shot, no reuse
+validateTurtle(dataTurtle, shapesTurtle, base);           // one-shot, no reuse
+validateTurtle(selfDescribingTurtle);                     // shapes carried by the data
 ```
+
+**The one-shot takes `(data, shapes)`, and took `(shapes, data)` before 0.2.0.**
+Data comes first in every other surface — the Python `validate(data, shapes)`,
+the CLI's `--data`/`--shapes`, and the Rust API under all of them — and this
+was the only one reversed. Omitting `shapes` validates a self-describing
+document against the shapes it carries, as the other two also do.
+
+Transposing them used to be a silent fault rather than a loud one: the data
+graph compiled as a shapes graph, declared no shapes, and validating against no
+shapes conforms — so the caller was told their graph was valid when nothing had
+been checked. A shapes graph with no shapes now throws instead, which is what
+makes the reordering safe: code written for the old signature fails rather than
+passing. `Validator.fromTurtle` stays permissive, since it exposes
+`shapeCount` for a caller who wants to decide for themselves.
 
 `inference: "rdfs"` validates against the RDFS closure of the data, so a finding
 can depend on an entailed `rdf:type` rather than only an asserted one.

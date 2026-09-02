@@ -544,6 +544,20 @@ hands over the whole `sh:ValidationReport` for querying or diffing. Terms are
 rendered the way RDF/JS renders `.value`: an IRI bare, a literal as its lexical
 form.
 
+There is also a one-shot for a caller with a single data graph, which takes
+`data` first like everything else here:
+
+```js
+import { validateTurtle } from 'shacl-wasm';
+
+validateTurtle(dataTurtle, shapesTurtle);   // shapes given
+validateTurtle(selfDescribingTurtle);       // shapes carried by the data
+```
+
+**It took `(shapes, data)` before 0.2.0** — the only surface in this repository
+with data second. See [Validating against nothing](#validating-against-nothing)
+for why transposing it was worth making impossible.
+
 Compile once and reuse the `Validator`. Each run gets its own copy of the term
 store, so reuse is genuinely cheaper rather than quietly accumulating — and on
 wasm32 the first validation of a large graph also pays a one-off cost to grow
@@ -568,6 +582,41 @@ An unrecognised mode is an error rather than a silent `none`.
 across — so it takes the sequential path. Conformance is the same 418 of 426
 either way, and the WebAssembly build is checked against the native one over
 every document in the W3C suite; see `crates/shacl-wasm/differential.js`.
+
+## Validating against nothing
+
+Validating a graph against no shapes conforms. That is correct — there is
+nothing to violate — and it is also the most dangerous answer this engine can
+give, because "conforms" is exactly what a caller hopes to see. A shapes graph
+that parsed but declared nothing recognisable reports success indistinguishable
+from success.
+
+The easiest way to reach it was to transpose the arguments of a one-shot call.
+The data graph compiles as a shapes graph, yields no shapes, and the report says
+the data is valid without a single constraint having been evaluated.
+
+So the one-shot entry points refuse it:
+
+```python
+shacl.validate("shapes.ttl", "data.ttl")   # transposed
+# ValueError: the shapes graph declares no shapes, so this would report that
+# the data conforms without having checked anything. Note the argument order
+# is validate(data, shapes). ...
+```
+
+The explicit two-step form stays permissive, because a caller who compiled a
+shapes graph on purpose can ask how it went — `len(shapes)` in Python,
+`validator.shapeCount` in JavaScript — and may legitimately want the empty case:
+
+```python
+shapes = shacl.Shapes.from_file("shapes.ttl")
+if len(shapes) == 0:
+    raise SystemExit("shapes.ttl declares no shapes")
+```
+
+The convenience function is opinionated; the explicit one is not. That line is
+deliberate: the API that hides the compile step is the one that has to speak up
+about it.
 
 ## Licence
 

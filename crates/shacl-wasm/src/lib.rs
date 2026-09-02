@@ -311,13 +311,38 @@ fn term(store: &TermStore, id: TermId) -> String {
 
 /// One-shot validation, for a caller with a single data graph that gains
 /// nothing from holding a compiled [`Validator`].
+///
+/// `data` comes first, and `shapes` may be omitted for a self-describing
+/// document that carries its own — the same call shape as the Python binding's
+/// `validate(data, shapes=None)`, the CLI's `--data`/`--shapes`, and the Rust
+/// `validate(data, shapes_graph, ..)` underneath all of them.
+///
+/// It used to take `(shapes, data)`, alone among the four. Transposing the two
+/// is not a loud mistake but a quiet one: the data graph compiles as a shapes
+/// graph, declares no shapes, and validating anything against no shapes
+/// conforms. The caller is told their graph is valid when nothing was checked.
+/// Hence the guard below, which is what makes this reordering safe to make —
+/// a call written for the old signature now fails instead of passing.
 #[wasm_bindgen(js_name = validateTurtle)]
 pub fn validate_turtle_once(
-    shapes: &str,
     data: &str,
+    shapes: Option<String>,
     base: Option<String>,
 ) -> Result<Report, JsValue> {
+    // A self-describing document carries its own shapes, as it does for the
+    // Python binding and the CLI.
+    let shapes = shapes.as_deref().unwrap_or(data);
     let validator = Validator::from_turtle(shapes, base.clone())?;
+    if validator.shape_count() == 0 {
+        return Err(err(
+            "the shapes graph declares no shapes, so this would report that \
+             the data conforms without having checked anything. If the two \
+             arguments were the other way round, note that this takes \
+             (data, shapes) — it took (shapes, data) before 0.2.0. To validate \
+             against an empty shapes graph deliberately, use \
+             `Validator.fromTurtle` and check `shapeCount` yourself.",
+        ));
+    }
     validator.validate_turtle(data, base, None)
 }
 
