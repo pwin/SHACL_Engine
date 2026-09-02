@@ -1002,7 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "shacl"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-cli"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -1033,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-python"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "pyo3",
  "shacl",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-wasm"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",
