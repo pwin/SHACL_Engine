@@ -321,15 +321,20 @@ jobs:
       # credential reads like a missing package. npm is separately restricting
       # tokens that bypass 2FA for direct publishing, which this was.
       #
-      # This needs a trusted publisher configured on npmjs.com for *each*
-      # package (repository `pwin/SHACL_Engine`, workflow `release.yml`).
-      # Without one npm looks for a token, finds none, and stops with
-      # `ENEEDAUTH` rather than anything mentioning OIDC.
+      # Trusted publishing needs a publisher configured on npmjs.com for *each*
+      # package (repository `pwin/SHACL_Engine`, workflow `release.yml`). The
+      # token below is the fallback for while that is being set up: npm 11.5.1+
+      # uses OIDC when the package has a trusted publisher and the token
+      # otherwise, so this publishes either way rather than depending on which
+      # of the two is in place first. Once a run reports trusted publishing,
+      # this `env:` block and both secrets can go.
       #
       # `--access public` is explicit rather than relied upon: these names are
       # unscoped and so public by default, but the flag means a later move to a
       # scope does not silently publish a private package instead.
       - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in pkg-bundler pkg-node; do
             echo "=== $dir ==="
