@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
+use shacl::model::index::{self, SourceDigest};
 use shacl::model::{Graph, TermStore, Vocab, loader, scope};
 
 #[derive(Parser)]
@@ -46,6 +47,23 @@ struct Args {
     /// The shapes graph's RDF syntax, on the same terms as `--data-format`.
     #[arg(long, visible_alias = "sf", value_enum)]
     shapes_format: Option<InputFormat>,
+
+    /// Cache the parsed data graph beside it as `<file>.shix`, so later runs
+    /// skip parsing.
+    ///
+    /// Parsing is around three quarters of a run over a large graph, and a
+    /// data graph that has not changed is parsed identically every time. The
+    /// cache is checked against the source on every use, so a stale one is
+    /// never read — see `--no-index`.
+    ///
+    /// Only for a single local `--data` file: a URL has nowhere to write, and
+    /// merged documents have no one source to check against.
+    #[arg(long)]
+    build_index: bool,
+
+    /// Ignore any `<file>.shix` cache and parse the data graph.
+    #[arg(long)]
+    no_index: bool,
 
     /// Write the report to a file rather than standard output.
     #[arg(short, long)]
@@ -618,6 +636,66 @@ fn load_all(
     Ok(b.build())
 }
 
+/// Where the cached index for `data` lives.
+///
+/// Appended rather than substituted, so `data.ttl` and `data.nt` in one
+/// directory keep separate caches instead of fighting over `data.shix`.
+fn index_path(data: &Path) -> PathBuf {
+    let mut name = data.as_os_str().to_os_string();
+    name.push(".shix");
+    PathBuf::from(name)
+}
+
+/// Reads the cached index for `data`, if there is a current one.
+///
+/// Returns `None` for every reason a cache can fail to apply — absent, stale,
+/// truncated, written by an older format — because all of them have the same
+/// remedy: parse the source, which is still there. A cache that made a run
+/// fail would be worse than no cache.
+///
+/// The source is read and digested on every use. That is not free, but reading
+/// bytes costs a small fraction of parsing them, and it is what makes a stale
+/// index impossible to read rather than merely unlikely.
+fn read_index(data: &Path) -> Option<(TermStore, Graph)> {
+    let path = index_path(data);
+    if !path.is_file() {
+        return None;
+    }
+    let digest = SourceDigest::of(&std::fs::read(data).ok()?);
+    let file = std::fs::File::open(&path).ok()?;
+    match index::read(&mut BufReader::new(file), Some(digest)) {
+        Ok(loaded) => Some(loaded),
+        Err(e) => {
+            // Worth a word: a cache silently doing nothing looks like the
+            // index feature not working at all.
+            eprintln!("note: ignoring {} ({e})", describe(&path));
+            None
+        }
+    }
+}
+
+/// Writes the cache for `data`.
+///
+/// Unlike reading, a failure here is reported: the run was asked to build an
+/// index, and one that quietly did not appear would be found much later.
+fn write_index(data: &Path, store: &TermStore, graph: &Graph) -> Result<()> {
+    let digest = SourceDigest::of(&std::fs::read(data).context("re-reading the data graph")?);
+    let path = index_path(data);
+    // Written to a temporary file and renamed, so an interrupted write leaves
+    // the previous index in place rather than a half-written one that the next
+    // run would have to detect.
+    let temp = path.with_extension("shix.tmp");
+    {
+        let file = std::fs::File::create(&temp)
+            .with_context(|| format!("creating {}", describe(&temp)))?;
+        let mut w = std::io::BufWriter::new(file);
+        index::write(&mut w, store, graph, digest)?;
+        std::io::Write::flush(&mut w).context("flushing the index")?;
+    }
+    std::fs::rename(&temp, &path).with_context(|| format!("renaming to {}", describe(&path)))?;
+    Ok(())
+}
+
 /// Rewrites pySHACL's multi-character short options into long ones.
 ///
 /// pySHACL is built on `argparse`, which allows `-df`; clap does not, and no
@@ -688,18 +766,49 @@ fn run() -> Result<bool> {
         args.shapes.clone()
     };
 
-    let mut store = TermStore::new();
-    let vocab = Vocab::new(&mut store);
+    // An index caches only a single local file: a URL has no bytes on disk to
+    // check a cache against, and several merged documents have no one source
+    // whose digest would mean anything.
+    let cacheable = match args.data.as_slice() {
+        [only] if !is_stdin(only) && only.is_file() => Some(only.clone()),
+        _ => None,
+    };
 
     let t0 = Instant::now();
-    let mut data = load_all(
-        &args.data,
-        args.data_format,
-        scope::DATA,
-        &mut store,
-        args.max_download,
-    )
-    .context("loading data graph")?;
+    let cached = match (&cacheable, args.no_index) {
+        (Some(path), false) => read_index(path),
+        _ => None,
+    };
+    let (mut store, vocab, mut data) = match cached {
+        Some((mut store, data)) => {
+            // Interning is idempotent, so this finds the vocabulary already in
+            // the restored store rather than minting a second copy of it.
+            let vocab = Vocab::new(&mut store);
+            (store, vocab, data)
+        }
+        None => {
+            let mut store = TermStore::new();
+            let vocab = Vocab::new(&mut store);
+            let data = load_all(
+                &args.data,
+                args.data_format,
+                scope::DATA,
+                &mut store,
+                args.max_download,
+            )
+            .context("loading data graph")?;
+            if args.build_index
+                && let Some(path) = &cacheable
+            {
+                write_index(path, &store, &data)
+                    .with_context(|| format!("writing the index for {}", describe(path)))?;
+            }
+            (store, vocab, data)
+        }
+    };
+    if args.build_index && cacheable.is_none() {
+        eprintln!("note: --build-index needs a single local --data file; nothing was written");
+    }
     if args.inference == Inference::Rdfs {
         data = shacl::inference::rdfs_closure(&data, &vocab)
             .context("materialising RDFS entailments")?;

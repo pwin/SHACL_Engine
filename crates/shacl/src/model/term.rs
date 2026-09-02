@@ -109,6 +109,26 @@ pub struct TermStore {
     blank_numbers: hashbrown::HashMap<Box<str>, u32>,
 }
 
+/// A store's persistable contents, as handed over by [`TermStore::parts`].
+///
+/// Named rather than a tuple because the four are easy to transpose: two of
+/// them are slices of integer triples.
+pub(crate) struct Parts<'a> {
+    pub strings: &'a Interner,
+    pub terms: &'a [TermData],
+    pub triple_terms: &'a [[TermId; 3]],
+    pub blank_numbers: &'a hashbrown::HashMap<Box<str>, u32>,
+}
+
+/// Records that `id` is the term of one kind built from string `s`.
+fn set_by_string(table: &mut Vec<u32>, s: StrId, id: TermId) {
+    let idx = s.0 as usize;
+    if idx >= table.len() {
+        table.resize(idx + 1, TermStore::NONE);
+    }
+    table[idx] = id.0;
+}
+
 impl Default for TermStore {
     fn default() -> Self {
         Self::new()
@@ -126,6 +146,61 @@ impl TermStore {
             triple_terms: Vec::new(),
             scratch: String::new(),
             blank_numbers: hashbrown::HashMap::default(),
+        }
+    }
+
+    /// The store's contents, for writing an index file.
+    ///
+    /// The hash tables are left out because they are derived, not because
+    /// they are cheap: `lookup` and the interner's table are both keyed on a
+    /// per-process random seed, so a persisted copy would be read back under a
+    /// different seed and find nothing. `named_of`/`blank_of` are a positional
+    /// index over `terms`. [`TermStore::from_parts`] rebuilds all four.
+    pub(crate) fn parts(&self) -> Parts<'_> {
+        Parts {
+            strings: &self.strings,
+            terms: &self.terms,
+            triple_terms: &self.triple_terms,
+            blank_numbers: &self.blank_numbers,
+        }
+    }
+
+    /// Rebuilds a store from what [`TermStore::parts`] wrote.
+    ///
+    /// `terms` is taken exactly as given. A term id is a position in that
+    /// vector, so reordering or deduplicating it here would silently change
+    /// what every stored triple refers to.
+    pub(crate) fn from_parts(
+        strings: Interner,
+        terms: Vec<TermData>,
+        triple_terms: Vec<[TermId; 3]>,
+        blank_numbers: hashbrown::HashMap<Box<str>, u32>,
+    ) -> Self {
+        let mut named_of = Vec::new();
+        let mut blank_of = Vec::new();
+        let mut lookup = hashbrown::HashMap::with_capacity(terms.len());
+        for (i, data) in terms.iter().enumerate() {
+            let id = TermId(i as u32);
+            match *data {
+                // Named and blank nodes stay out of `lookup`, exactly as
+                // `by_string` leaves them out when interning: the two arrays
+                // are their index.
+                TermData::NamedNode(s) => set_by_string(&mut named_of, s, id),
+                TermData::BlankNode(s) => set_by_string(&mut blank_of, s, id),
+                other => {
+                    lookup.insert(other, id);
+                }
+            }
+        }
+        Self {
+            strings,
+            terms,
+            lookup,
+            named_of,
+            blank_of,
+            triple_terms,
+            scratch: String::new(),
+            blank_numbers,
         }
     }
 

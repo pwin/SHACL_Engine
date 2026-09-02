@@ -121,6 +121,39 @@ Only the URLs given on the command line are ever fetched. Nothing in a fetched
 document triggers a further request: `owl:imports` is not followed, so a
 shapes graph cannot reach anywhere you did not name.
 
+### Caching the parsed graph
+
+Parsing is most of a run — 1.3s of the 1.8s at 100k instances above — and a
+data graph that has not changed parses to exactly the same thing every time.
+`--build-index` writes what parsing produced beside the source as
+`<file>.shix`, and later runs read that instead:
+
+```sh
+shacl -d data.ttl -s shapes.ttl --build-index   # parses, and writes data.ttl.shix
+shacl -d data.ttl -s shapes.ttl                 # reads the index; no parsing
+shacl -d data.ttl -s shapes.ttl --no-index      # ignores it and parses anyway
+```
+
+On the 100k benchmark that takes loading from 1.31s to 0.15s — best of three
+either way, as elsewhere in this file; the middle runs were 1.36s and 0.21s —
+and leaves the report byte-identical, which is the property the tests assert
+rather than that the same triples come back in some order.
+
+**The cache cannot go stale.** The index records a digest of the source, and
+every run re-reads the source to check it. A file that has changed by so much
+as a byte falls back to parsing, with a note saying so. That check costs a read
+of the file but not a parse, which is why it is affordable enough to do every
+time rather than trusting a timestamp — copying a file or checking it out fresh
+updates its mtime without changing a byte, and a cache keyed on that would
+answer for data that is no longer there.
+
+Two limits worth knowing. It applies to a single local `--data` file: a URL has
+nothing on disk to check against, and several merged documents have no one
+source whose digest would mean anything. And the index is a little *larger*
+than the source it replaces — 19.5 MB against 18.6 MB here — because it stores
+terms expanded rather than in Turtle's abbreviated syntax. It buys time, not
+space.
+
 ### Compressed input
 
 `.gz` is read directly, locally and over HTTP, and the syntax comes from what

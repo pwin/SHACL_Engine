@@ -40,6 +40,39 @@ impl Interner {
         Self::default()
     }
 
+    /// The arena and its spans, for writing an index file.
+    ///
+    /// The hash table is deliberately not exposed: its seed is randomised per
+    /// process, so a persisted table would be meaningless in the next one.
+    /// [`Interner::from_parts`] rebuilds it instead.
+    pub(crate) fn parts(&self) -> (&str, &[(u32, u32)]) {
+        (&self.buf, &self.spans)
+    }
+
+    /// Rebuilds an interner from what [`Interner::parts`] wrote.
+    ///
+    /// Re-hashing every string is the cost of not persisting the table, and it
+    /// is the cheap part of loading: interning is about a tenth of what
+    /// parsing the same document costs.
+    pub(crate) fn from_parts(buf: String, spans: Vec<(u32, u32)>) -> Self {
+        let hasher = RandomState::default();
+        let mut table = HashTable::with_capacity(spans.len());
+        for (i, &(off, len)) in spans.iter().enumerate() {
+            let s = &buf[off as usize..(off + len) as usize];
+            let hash = hash_str(&hasher, s);
+            table.insert_unique(hash, i as u32, |&id| {
+                let (o, l) = spans[id as usize];
+                hash_str(&hasher, &buf[o as usize..(o + l) as usize])
+            });
+        }
+        Self {
+            buf,
+            spans,
+            table,
+            hasher,
+        }
+    }
+
     /// Interns `s`, returning the existing id if it has been seen before.
     pub fn intern(&mut self, s: &str) -> StrId {
         // Destructured so the lookup closure can borrow `buf`/`spans` while

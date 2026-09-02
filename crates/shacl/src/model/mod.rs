@@ -1,6 +1,7 @@
 //! The RDF substrate: interned terms and indexed graphs.
 
 pub mod graph;
+pub mod index;
 pub mod interner;
 pub mod loader;
 pub mod term;
