@@ -314,6 +314,22 @@ was not substituted. And a message annotated onto a constraint triple —
 All six are fixed, and a report that is right but misshapen is now a test
 failure.
 
+### An EARL report
+
+The W3C compiles a specification's implementation report from EARL files —
+the Evaluation and Report Language, one `earl:Assertion` per test naming the
+test, the implementation and the outcome. The harness writes one:
+
+```sh
+SHACL_TEST_EARL=earl.ttl cargo test -p shacl --test w3c w3c_test_suites -- --nocapture
+```
+
+An assertion is `earl:passed` only when the test passes both comparisons
+above; a test that could not run is `earl:cantTell`, since it says nothing
+about the engine. The file is what a submission to the SHACL implementation
+report would be built from, with the engine and this harness as `doap:` and
+`earl:Assertor` descriptions at the top.
+
 ### What conforms means
 
 `sh:conforms` is false when the report holds a result whose severity breaks

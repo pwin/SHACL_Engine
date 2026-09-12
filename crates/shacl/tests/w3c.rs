@@ -91,6 +91,9 @@ fn percent_decode(s: &str) -> String {
 
 struct Outcome {
     name: String,
+    /// The test's IRI as the manifest names it, which is what an EARL
+    /// assertion refers to.
+    iri: String,
     status: Status,
     /// The same test compared the way the suite itself compares: the actual
     /// report graph against the expected one, up to blank-node isomorphism.
@@ -116,6 +119,7 @@ fn run_manifest(manifest: &Path, out: &mut Vec<Outcome>) {
         Err(e) => {
             out.push(Outcome {
                 name: manifest.display().to_string(),
+                iri: String::new(),
                 status: Status::Error(format!("could not load manifest: {e}")),
                 iso: None,
             });
@@ -144,6 +148,7 @@ fn run_manifest(manifest: &Path, out: &mut Vec<Outcome>) {
         if !is_validate && !is_eval {
             continue;
         }
+        let iri = store.iri(entry).map(str::to_owned).unwrap_or_default();
         let name = store
             .iri(entry)
             .map(|i| short_name(i, manifest))
@@ -156,7 +161,12 @@ fn run_manifest(manifest: &Path, out: &mut Vec<Outcome>) {
                 None,
             )
         };
-        out.push(Outcome { name, status, iso });
+        out.push(Outcome {
+            name,
+            iri,
+            status,
+            iso,
+        });
     }
 }
 
@@ -819,6 +829,80 @@ fn w3c_test_suites() {
     // The suites must at least be discovered; the pass count is tracked by
     // `progress` below rather than asserted here.
     assert!(total > 0, "no tests were discovered");
+
+    if let Some(path) = std::env::var_os("SHACL_TEST_EARL") {
+        let all: Vec<&Outcome> = per_suite.values().flatten().collect();
+        let earl = earl_report(&all);
+        std::fs::write(&path, earl).expect("EARL report should be writable");
+        println!(
+            "\n  EARL report written to {}",
+            PathBuf::from(&path).display()
+        );
+    }
+}
+
+/// The run as an EARL report — the W3C Evaluation and Report Language, which
+/// is what a SHACL implementation report is compiled from.
+///
+/// One `earl:Assertion` per test, `earl:passed` only when both comparisons
+/// pass: the suite's own graph isomorphism and the per-result one. A test
+/// that could not be run is `earl:cantTell` rather than `earl:failed`,
+/// because it says nothing about the engine.
+///
+/// Written with `SHACL_TEST_EARL=path cargo test -p shacl --test w3c
+/// w3c_test_suites -- --nocapture`. The subject and assertor are this
+/// project and its repository; a submission to the W3C would set
+/// `doap:release` to the version being reported on, which this reads from
+/// the crate.
+fn earl_report(outcomes: &[&Outcome]) -> String {
+    use std::fmt::Write;
+    let version = env!("CARGO_PKG_VERSION");
+    let mut out = String::new();
+    writeln!(
+        out,
+        "@prefix earl: <http://www.w3.org/ns/earl#> .
+@prefix doap: <http://usefulinc.com/ns/doap#> .
+@prefix dc:   <http://purl.org/dc/terms/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+<https://github.com/pwin/SHACL_Engine>
+    a doap:Project, earl:TestSubject, earl:Software ;
+    doap:name \"shacl\" ;
+    doap:description \"A SHACL 1.0 and 1.2 validation engine in Rust\"@en ;
+    doap:homepage <https://github.com/pwin/SHACL_Engine> ;
+    doap:programming-language \"Rust\" ;
+    doap:release [ doap:name \"shacl {version}\" ; doap:revision \"{version}\" ] ;
+    doap:developer <https://github.com/pwin> .
+
+<https://github.com/pwin/SHACL_Engine/tree/develop/crates/shacl/tests/w3c.rs>
+    a earl:Assertor, earl:Software ;
+    doap:name \"shacl W3C test harness\" .
+"
+    )
+    .unwrap();
+    for o in outcomes {
+        if o.iri.is_empty() {
+            continue;
+        }
+        let outcome = match (&o.status, &o.iso) {
+            (Status::Pass, None | Some(Ok(()))) => "earl:passed",
+            (Status::Pass, Some(Err(_))) | (Status::Mismatch(_), _) => "earl:failed",
+            (Status::Error(_), _) => "earl:cantTell",
+        };
+        writeln!(
+            out,
+            "[] a earl:Assertion ;
+    earl:assertedBy <https://github.com/pwin/SHACL_Engine/tree/develop/crates/shacl/tests/w3c.rs> ;
+    earl:subject <https://github.com/pwin/SHACL_Engine> ;
+    earl:test <{}> ;
+    earl:mode earl:automatic ;
+    earl:result [ a earl:TestResult ; earl:outcome {outcome} ] .",
+            o.iri
+        )
+        .unwrap();
+    }
+    out
 }
 
 #[test]
