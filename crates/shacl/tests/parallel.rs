@@ -96,6 +96,7 @@ fn report(l: &mut Loaded, threads: usize) -> String {
         &l.store,
         &l.vocab,
         &l.shapes_graph,
+        &l.shapes,
         &[],
     )
     .expect("report should serialise")
@@ -167,6 +168,7 @@ fn the_default_is_to_split() {
             &l.store,
             &l.vocab,
             &l.shapes_graph,
+            &l.shapes,
             &[],
         )
         .expect("report should serialise")

@@ -244,6 +244,7 @@ impl Validator {
                 store,
                 &self.vocab,
                 &self.shapes_graph,
+                &self.shapes,
                 &disallowed,
             )
             .map_err(err)?;

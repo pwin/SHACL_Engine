@@ -528,7 +528,13 @@ impl Shapes {
         Ok(Report {
             conforms: report.conforms(&[vocab.sh_Violation]),
             results,
-            graph: report.to_oxrdf(store, vocab, &self.shapes_graph, &[vocab.sh_Violation]),
+            graph: report.to_oxrdf(
+                store,
+                vocab,
+                &self.shapes_graph,
+                &self.compiled,
+                &[vocab.sh_Violation],
+            ),
         })
     }
 }

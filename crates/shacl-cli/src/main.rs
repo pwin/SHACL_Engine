@@ -970,7 +970,7 @@ fn run() -> Result<bool> {
     // queried, diffed, or handed to another tool. It carries `sh:conforms`
     // itself, so nothing is printed alongside it.
     let text = if let Some(rdf) = args.format.rdf() {
-        report.serialize(rdf, &store, &vocab, shapes_ref, &disallowed)?
+        report.serialize(rdf, &store, &vocab, shapes_ref, &compiled, &disallowed)?
     } else {
         let mut out = format!("conforms: {conforms}\n");
         if !args.quiet {

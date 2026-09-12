@@ -64,7 +64,14 @@ fn report(format: RdfFormat) -> String {
     .expect("validation should succeed");
 
     report
-        .serialize(format, &store, &vocab, &shapes, &[vocab.sh_Violation])
+        .serialize(
+            format,
+            &store,
+            &vocab,
+            &shapes,
+            &compiled,
+            &[vocab.sh_Violation],
+        )
         .expect("report should serialise")
 }
 

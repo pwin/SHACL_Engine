@@ -61,10 +61,19 @@ fn report_from_source() -> String {
     let vocab = Vocab::new(&mut store);
     let data = parse_into(DATA, 0, &mut store);
     let shapes_graph = parse_into(SHAPES, 1, &mut store);
-    let report = shacl::validate::validate(&data, &shapes_graph, &mut store, &vocab)
+    let compiled = shacl::shapes::Shapes::compile(&shapes_graph, &store, &vocab)
+        .expect("shapes should compile");
+    let report = shacl::validate::validate_in(&data, &compiled, &shapes_graph, &mut store, &vocab)
         .expect("validation should run");
     report
-        .serialize(RdfFormat::NTriples, &store, &vocab, &shapes_graph, &[])
+        .serialize(
+            RdfFormat::NTriples,
+            &store,
+            &vocab,
+            &shapes_graph,
+            &compiled,
+            &[],
+        )
         .expect("report should serialise")
 }
 
@@ -91,10 +100,19 @@ fn report_via_index() -> String {
     // already in the restored store rather than minting new ones.
     let vocab = Vocab::new(&mut store);
     let shapes_graph = parse_into(SHAPES, 1, &mut store);
-    let report = shacl::validate::validate(&data, &shapes_graph, &mut store, &vocab)
+    let compiled = shacl::shapes::Shapes::compile(&shapes_graph, &store, &vocab)
+        .expect("shapes should compile");
+    let report = shacl::validate::validate_in(&data, &compiled, &shapes_graph, &mut store, &vocab)
         .expect("validation should run");
     report
-        .serialize(RdfFormat::NTriples, &store, &vocab, &shapes_graph, &[])
+        .serialize(
+            RdfFormat::NTriples,
+            &store,
+            &vocab,
+            &shapes_graph,
+            &compiled,
+            &[],
+        )
         .expect("report should serialise")
 }
 

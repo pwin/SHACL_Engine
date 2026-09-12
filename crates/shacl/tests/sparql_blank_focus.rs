@@ -210,6 +210,7 @@ ex:S a sh:NodeShape ;
             &store,
             &vocab,
             &shapes_g,
+            &compiled,
             &[vocab.sh_Violation],
         )
         .unwrap();
