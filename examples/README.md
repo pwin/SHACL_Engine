@@ -10,6 +10,7 @@ made, or a binary you downloaded and would rather not take on trust.
 | `person-invalid.ttl` | Data where each subject breaks exactly one constraint |
 | `self-contained.ttl` | Shapes and data in one document |
 | `check.sh` | Runs all of the below and checks the answers |
+| `enterprise/` | The large one: most of SHACL Core in one shapes graph, a generator that seeds and counts every fault, and a test that holds the engine to the counts at any size. See [its README](enterprise/README.md) |
 
 ## The quick version
 

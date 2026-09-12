@@ -1521,6 +1521,13 @@ impl Engine<'_> {
         for row in sets.rows() {
             let this = crate::sparql::to_term(row.focus, store);
             let current_shape = crate::sparql::to_term(shape.node, store);
+            // Kept for the message: pre-binding substitutes `$this` into the
+            // query as a constant, so a solution row does not carry it, and
+            // `{$this}` in a message has to be answered from here.
+            let prebound = [
+                ("this", message_value(&this)),
+                ("currentShape", message_value(&current_shape)),
+            ];
             let solutions = crate::sparql::run_in(
                 &sc.query,
                 &[
@@ -1553,7 +1560,14 @@ impl Engine<'_> {
                 if sc.message.is_empty() {
                     r.messages.clone_from(&shape.messages);
                 } else {
-                    let lookup = |name: &str| solution.get(name).map(message_value);
+                    let lookup = |name: &str| {
+                        solution.get(name).map(message_value).or_else(|| {
+                            prebound
+                                .iter()
+                                .find(|(n, _)| *n == name)
+                                .map(|(_, v)| v.clone())
+                        })
+                    };
                     r.messages = sc
                         .message
                         .iter()

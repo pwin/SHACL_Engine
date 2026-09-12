@@ -1,0 +1,46 @@
+# Expected results for data-2000.ttl. Generated; do not edit.
+[shapes.ttl]
+ClassConstraintComponent 190
+ClosedConstraintComponent 50
+DatatypeConstraintComponent 156
+HasValueConstraintComponent 50
+InConstraintComponent 40
+LanguageInConstraintComponent 108
+LessThanConstraintComponent 50
+MaxCountConstraintComponent 120
+MaxInclusiveConstraintComponent 100
+MaxLengthConstraintComponent 50
+MinCountConstraintComponent 398
+MinExclusiveConstraintComponent 50
+MinInclusiveConstraintComponent 156
+MinLengthConstraintComponent 100
+NodeConstraintComponent 57
+NodeKindConstraintComponent 40
+OrConstraintComponent 7
+PatternConstraintComponent 106
+UniqueLangConstraintComponent 50
+XoneConstraintComponent 100
+total 1978
+[shapes-advanced.ttl]
+ClassConstraintComponent 190
+ClosedConstraintComponent 50
+DatatypeConstraintComponent 156
+HasValueConstraintComponent 50
+InConstraintComponent 40
+LanguageInConstraintComponent 108
+LessThanConstraintComponent 50
+MaxCountConstraintComponent 120
+MaxInclusiveConstraintComponent 100
+MaxLengthConstraintComponent 50
+MinCountConstraintComponent 398
+MinExclusiveConstraintComponent 50
+MinInclusiveConstraintComponent 156
+MinLengthConstraintComponent 100
+NodeConstraintComponent 57
+NodeKindConstraintComponent 40
+OrConstraintComponent 7
+PatternConstraintComponent 106
+SPARQLConstraintComponent 470
+UniqueLangConstraintComponent 50
+XoneConstraintComponent 100
+total 2448

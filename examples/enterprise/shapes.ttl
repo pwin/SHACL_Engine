@@ -1,0 +1,266 @@
+@prefix ex:   <http://example.org/enterprise#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# An organisation: people in departments, reporting to managers, working on
+# projects, writing documents. Written to use most of SHACL Core in one place
+# and in combination — nested shapes, every kind of compound path, the logical
+# constraints, qualified value shapes, closedness, property pairs, language
+# handling, three severities and four kinds of target — so that a single run
+# exercises the engine the way a real shapes graph does rather than one
+# constraint at a time.
+#
+# `generate.py` produces data for it in which every fault is seeded
+# deliberately and counted, so the report a run produces can be checked
+# result for result. See README.md for the list.
+
+# --- the class hierarchy lives in the data graph, where SHACL reads it; it is
+# repeated here only so the shapes file reads on its own.
+ex:Agent      a rdfs:Class .
+ex:Person     a rdfs:Class ; rdfs:subClassOf ex:Agent .
+ex:Employee   a rdfs:Class ; rdfs:subClassOf ex:Person .
+ex:Manager    a rdfs:Class ; rdfs:subClassOf ex:Employee .
+ex:Department a rdfs:Class .
+ex:Project    a rdfs:Class .
+ex:Address    a rdfs:Class .
+ex:Document   a rdfs:Class .
+
+# ----------------------------------------------------------------- people
+
+ex:PersonShape
+  a sh:NodeShape ;
+  sh:targetClass ex:Person ;   # reaches Employee and Manager through rdfs:subClassOf
+  sh:property [
+    sh:path ex:name ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:datatype xsd:string ;
+    sh:minLength 3 ; sh:maxLength 60 ;
+    sh:message "A person has exactly one name of 3 to 60 characters"@en ;
+  ] ;
+  sh:property [
+    sh:path ex:email ;
+    sh:maxCount 1 ;
+    sh:pattern "^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$" ;
+    sh:flags "i" ;
+  ] ;
+  # An alternative path: one of two predicates must carry a value.
+  sh:property [
+    sh:path [ sh:alternativePath ( ex:email ex:altEmail ) ] ;
+    sh:minCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:age ;
+    sh:maxCount 1 ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 16 ; sh:maxInclusive 100 ;
+  ] ;
+  sh:property [
+    sh:path ex:salary ;
+    sh:datatype xsd:decimal ;
+    sh:minExclusive 0 ;
+    sh:severity sh:Warning ;
+  ] ;
+  # A property pair: the end of an engagement is after its start.
+  sh:property [
+    sh:path ex:startDate ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:datatype xsd:date ;
+    sh:lessThan ex:endDate ;
+  ] ;
+  sh:property [
+    sh:path ex:status ;
+    sh:minCount 1 ;
+    sh:in ( "active" "leave" "left" ) ;
+  ] ;
+  # Language handling: every label tagged, in a permitted language, one per
+  # language.
+  sh:property [
+    sh:path ex:label ;
+    sh:datatype rdf:langString ;
+    sh:languageIn ( "en" "fr" "de" ) ;
+    sh:uniqueLang true ;
+    sh:severity sh:Info ;
+  ] ;
+  # A sequence path: the department worked in must have a name.
+  sh:property [
+    sh:path ( ex:worksIn ex:name ) ;
+    sh:minCount 1 ;
+    sh:datatype xsd:string ;
+  ] ;
+  sh:property [
+    sh:path ex:worksIn ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:nodeKind sh:IRI ;
+    sh:class ex:Department ;
+  ] ;
+  # Exactly one identity scheme applies.
+  sh:xone (
+    [ sh:property [ sh:path ex:staffId ; sh:minCount 1 ; sh:pattern "^E-[0-9]{6}$" ] ]
+    [ sh:property [ sh:path ex:contractorId ; sh:minCount 1 ; sh:pattern "^C-[0-9]{6}$" ] ]
+  ) ;
+  # Everyone reachable by following `reportsTo` any number of times is a
+  # person; everyone reached by following it at least once is a manager.
+  sh:property [
+    sh:path [ sh:zeroOrMorePath ex:reportsTo ] ;
+    sh:class ex:Person ;
+  ] ;
+  sh:property [
+    sh:path [ sh:oneOrMorePath ex:reportsTo ] ;
+    sh:class ex:Manager ;
+  ] ;
+  # A person is not a department, whatever else they are.
+  sh:not [ sh:class ex:Department ] .
+
+# Managers, in addition: they manage a department, and it is the one they work
+# in. `sh:equals` compares the values of two paths on the same focus node.
+ex:ManagerShape
+  a sh:NodeShape ;
+  sh:targetClass ex:Manager ;
+  sh:property [
+    sh:path ex:manages ;
+    sh:minCount 1 ;
+    sh:class ex:Department ;
+    sh:equals ex:worksIn ;
+  ] .
+
+# ------------------------------------------------------------ addresses
+
+# Targeted through the predicate that points at them, so a faulty address is
+# reported as itself rather than through the person who has it. Closed: an
+# address carries the four listed properties and its type, nothing else.
+ex:AddressShape
+  a sh:NodeShape ;
+  sh:targetObjectsOf ex:address ;
+  sh:nodeKind sh:BlankNode ;
+  sh:closed true ;
+  sh:ignoredProperties ( rdf:type ) ;
+  sh:property [ sh:path ex:street   ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ;
+  sh:property [ sh:path ex:city     ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ;
+  sh:property [ sh:path ex:postcode ; sh:minCount 1 ; sh:maxCount 1 ; sh:pattern "^[A-Z]{2}[0-9]{4}$" ] ;
+  sh:property [ sh:path ex:country  ; sh:maxCount 1 ; sh:hasValue "GB" ] .
+
+# ---------------------------------------------------------- departments
+
+ex:DepartmentShape
+  a sh:NodeShape ;
+  sh:targetClass ex:Department ;
+  sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:maxCount 1 ; sh:datatype xsd:string ] ;
+  sh:property [ sh:path ex:code ; sh:minCount 1 ; sh:maxCount 1 ; sh:pattern "^D[0-9]{3}$" ] ;
+  sh:property [ sh:path ex:budget ; sh:minCount 1 ; sh:datatype xsd:decimal ; sh:minInclusive 0 ] ;
+  # An inverse path: exactly one manager manages this department.
+  sh:property [
+    sh:path [ sh:inversePath ex:manages ] ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:class ex:Manager ;
+  ] ;
+  # A qualified value shape over another inverse path: among the people who
+  # work here, at least one is a manager, and at most one hundred are.
+  sh:property [
+    sh:path [ sh:inversePath ex:worksIn ] ;
+    sh:qualifiedValueShape [ sh:class ex:Manager ] ;
+    sh:qualifiedMinCount 1 ;
+    sh:qualifiedMaxCount 100 ;
+  ] .
+
+# ------------------------------------------------------------- projects
+
+ex:ProjectShape
+  a sh:NodeShape ;
+  sh:targetClass ex:Project ;
+  sh:property [
+    sh:path ex:title ;
+    sh:minCount 1 ;
+    sh:languageIn ( "en" "fr" ) ;
+    sh:uniqueLang true ;
+  ] ;
+  # The lead is a manager, checked as a nested node shape rather than a class,
+  # so the report says which requirement on the lead failed.
+  sh:property [
+    sh:path ex:lead ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:node ex:LeadShape ;
+  ] ;
+  sh:property [
+    sh:path ex:member ;
+    sh:minCount 2 ;
+    sh:class ex:Person ;
+    # The lead is also a member.
+    sh:disjoint ex:externalContact ;
+  ] ;
+  sh:property [
+    sh:path ex:externalContact ;
+    sh:maxCount 2 ;
+    sh:nodeKind sh:IRI ;
+  ] ;
+  # Either a budget or a sponsor, or both.
+  sh:or (
+    [ sh:property [ sh:path ex:budget ; sh:minCount 1 ] ]
+    [ sh:property [ sh:path ex:sponsor ; sh:minCount 1 ] ]
+  ) .
+
+# Two levels of nesting: a lead is a manager, whose department is real.
+ex:LeadShape
+  a sh:NodeShape ;
+  sh:class ex:Manager ;
+  sh:property [
+    sh:path ex:worksIn ;
+    sh:minCount 1 ;
+    sh:node ex:DepartmentNodeShape ;
+  ] .
+
+ex:DepartmentNodeShape
+  a sh:NodeShape ;
+  sh:class ex:Department ;
+  sh:property [ sh:path ex:code ; sh:minCount 1 ] .
+
+# ------------------------------------------------------------ documents
+
+ex:DocumentShape
+  a sh:NodeShape ;
+  sh:targetClass ex:Document ;
+  sh:property [
+    sh:path ex:title ;
+    sh:minCount 1 ;
+    sh:datatype rdf:langString ;
+    sh:languageIn ( "en" "fr" "de" ) ;
+    sh:uniqueLang true ;
+  ] ;
+  # A sequence path through the author: the author's name.
+  sh:property [
+    sh:path ( ex:author ex:name ) ;
+    sh:minCount 1 ;
+    sh:datatype xsd:string ;
+  ] ;
+  sh:property [
+    sh:path ex:author ;
+    sh:minCount 1 ;
+    sh:class ex:Person ;
+  ] ;
+  sh:property [
+    sh:path ex:approvedBy ;
+    sh:maxCount 1 ;
+    sh:node ex:LeadShape ;
+  ] ;
+  sh:property [
+    sh:path ex:version ;
+    sh:minCount 1 ; sh:maxCount 1 ;
+    sh:datatype xsd:integer ;
+    sh:minInclusive 1 ;
+  ] .
+
+# ---------------------------------------------------------- one by name
+
+# A node target: the chief executive reports to nobody.
+ex:ChiefShape
+  a sh:NodeShape ;
+  sh:targetNode ex:ceo ;
+  sh:property [ sh:path ex:reportsTo ; sh:maxCount 0 ] ;
+  sh:property [ sh:path ex:manages ; sh:minCount 1 ] .
+
+# A subjects-of target: whoever has a salary has a status.
+ex:PaidShape
+  a sh:NodeShape ;
+  sh:targetSubjectsOf ex:salary ;
+  sh:property [ sh:path ex:status ; sh:minCount 1 ] .

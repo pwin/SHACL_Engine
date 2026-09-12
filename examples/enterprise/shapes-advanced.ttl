@@ -1,0 +1,46 @@
+@prefix ex:   <http://example.org/enterprise#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sh:   <http://www.w3.org/ns/shacl#> .
+@prefix xsd:  <http://www.w3.org/2001/XMLSchema#> .
+
+# Everything in shapes.ttl, plus what takes a run off the parallel path: a
+# SPARQL constraint, and a SHACL-AF rule. Load both files as the shapes graph:
+#
+#   shacl -d data-2000.ttl -s shapes.ttl shapes-advanced.ttl
+#
+# The SPARQL constraint says: someone whose status is "left" has an end date.
+# Its message names the person, which `{$this}` substitutes at report time.
+#
+# The rule infers a seniority for everyone over fifty. It is inert unless rules
+# are asked for (`--advanced`), and it is here so that a run with them on has
+# something to infer over a graph of this size.
+
+ex:LeaverShape
+  a sh:NodeShape ;
+  sh:targetClass ex:Person ;
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "{$this} has left but has no end date"@en ;
+    sh:prefixes ex: ;
+    sh:select """
+      SELECT $this WHERE {
+        $this ex:status "left" .
+        FILTER NOT EXISTS { $this ex:endDate ?end }
+      }
+    """ ;
+  ] ;
+  sh:rule [
+    a sh:TripleRule ;
+    sh:subject sh:this ;
+    sh:predicate ex:seniority ;
+    sh:object "senior" ;
+    sh:condition [ sh:property [ sh:path ex:age ; sh:minInclusive 50 ] ] ;
+  ] .
+
+ex:
+  a owl:Ontology ;
+  sh:declare [
+    sh:prefix "ex" ;
+    sh:namespace "http://example.org/enterprise#"^^xsd:anyURI ;
+  ] .
