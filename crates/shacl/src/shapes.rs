@@ -125,8 +125,12 @@ pub enum Constraint {
         by_types: bool,
     },
     /// `sh:reifierShape`: the reifiers of each `(focus, path, value)` triple
-    /// must conform to the given shape.
-    ReifierShape(ShapeId),
+    /// must conform to the given shape. With `sh:reificationRequired true`,
+    /// a value with no reifier at all is also a violation.
+    ReifierShape {
+        shape: ShapeId,
+        required: bool,
+    },
     HasValue(TermId),
     In(Vec<TermId>),
 
@@ -205,7 +209,7 @@ impl Constraint {
             // evaluator overrides this.
             Self::QualifiedValueShape { .. } => v.sh_QualifiedMinCountConstraintComponent,
             Self::Closed { .. } => v.sh_ClosedConstraintComponent,
-            Self::ReifierShape(_) => v.sh_ReifierShapeConstraintComponent,
+            Self::ReifierShape { .. } => v.sh_ReifierShapeConstraintComponent,
             Self::HasValue(_) => v.sh_HasValueConstraintComponent,
             Self::In(_) => v.sh_InConstraintComponent,
             Self::MinListLength(_) => v.sh_MinListLengthConstraintComponent,
@@ -247,6 +251,9 @@ pub struct Shape {
     /// The raw `sh:path` node, carried so `sh:resultPath` can be serialised
     /// with its original structure.
     pub path_node: Option<TermId>,
+    /// `sh:values`: a node expression that supplies the value nodes in place
+    /// of evaluating `path`. The path is still what the report names.
+    pub values: Option<TermId>,
     pub targets: Vec<Target>,
     pub constraints: Vec<Constraint>,
     pub severity: TermId,
@@ -262,6 +269,10 @@ pub struct Shape {
     /// `sh:class ex:A` and `sh:class ex:B`, each annotated differently — merge
     /// their messages here, which is the approximation this buys.
     pub component_messages: HashMap<TermId, Vec<TermId>>,
+    /// The same for `sh:severity`: `sh:datatype xsd:integer {| sh:severity
+    /// sh:Warning |}` gives results of that one constraint the annotated
+    /// severity instead of the shape's.
+    pub component_severity: HashMap<TermId, TermId>,
     pub deactivated: bool,
     /// SHACL-AF rules attached with `sh:rule`. Empty for almost every shape,
     /// and never consulted unless rules are asked for.
@@ -318,11 +329,13 @@ impl Shape {
             node,
             path: None,
             path_node: None,
+            values: None,
             targets: Vec::new(),
             constraints: Vec::new(),
             severity,
             messages: Vec::new(),
             component_messages: HashMap::new(),
+            component_severity: HashMap::new(),
             deactivated: false,
             rules: Vec::new(),
             order: 0.0,
@@ -376,7 +389,8 @@ impl Shapes {
     /// reported.
     pub fn mints_terms(&self) -> bool {
         self.shapes.iter().any(|s| {
-            s.targets.iter().any(|t| matches!(t, Target::Sparql(_)))
+            s.values.is_some()
+                || s.targets.iter().any(|t| matches!(t, Target::Sparql(_)))
                 || s.constraints.iter().any(|c| {
                     matches!(
                         c,
@@ -480,7 +494,7 @@ impl Shapes {
                 Constraint::Not(s)
                 | Constraint::Node(s)
                 | Constraint::Property(s)
-                | Constraint::ReifierShape(s)
+                | Constraint::ReifierShape { shape: s, .. }
                 | Constraint::MemberShape(s)
                 | Constraint::SomeValue(s) => out.push(*s),
                 Constraint::And(v) | Constraint::Or(v) | Constraint::Xone(v) => {
@@ -699,47 +713,51 @@ impl<'a> Compiler<'a> {
 
         let rules = self.compile_rules(node)?;
 
+        let annotations = self.annotations(node);
+        let values = g.object(node, v.sh_values);
         Ok(Shape {
             node,
             path,
             path_node,
+            values,
             targets,
             constraints,
             severity,
             messages: g.objects(node, v.sh_message).collect(),
-            component_messages: self.annotated_messages(node),
+            component_messages: annotations.0,
+            component_severity: annotations.1,
             deactivated,
             rules,
             order: self.number(node, v.sh_order).unwrap_or(0.0),
         })
     }
 
-    /// Messages attached to a shape's constraint triples through RDF 1.2
-    /// reification, by the component each triple's parameter belongs to.
+    /// Messages and severities attached to a shape's constraint triples
+    /// through RDF 1.2 reification, keyed by the component each triple's
+    /// parameter belongs to.
     ///
     /// `ex:S sh:datatype xsd:integer {| sh:message "m" |}` parses to a reifier
     /// `_:r rdf:reifies << ex:S sh:datatype xsd:integer >> ; sh:message "m"`.
-    /// So for every triple about the shape, look up its triple term, then any
-    /// reifier of it, then that reifier's messages.
+    /// For every triple about the shape this looks up its triple term, then
+    /// any reifier of it, then the reifier's `sh:message` and `sh:severity`.
     ///
-    /// A parameter's component is derived from its name — `sh:datatype` is
-    /// `sh:DatatypeConstraintComponent` — and checked against the vocabulary,
-    /// which drops `sh:flags`, `sh:ignoredProperties` and the other parameters
-    /// that belong to a component named after a different one. A message on
-    /// one of those has nowhere to go and is left where it is.
-    fn annotated_messages(&self, node: TermId) -> HashMap<TermId, Vec<TermId>> {
+    /// The component is derived from the parameter's name: `sh:datatype`
+    /// gives `sh:DatatypeConstraintComponent`. The derived IRI is checked
+    /// against the vocabulary, so parameters such as `sh:flags` and
+    /// `sh:ignoredProperties`, whose component is named after a different
+    /// parameter, are skipped. An annotation on one of those is ignored.
+    #[allow(clippy::type_complexity)]
+    fn annotations(&self, node: TermId) -> (HashMap<TermId, Vec<TermId>>, HashMap<TermId, TermId>) {
         let v = self.vocab;
         let g = self.graph;
-        let mut out: HashMap<TermId, Vec<TermId>> = HashMap::new();
+        let mut messages: HashMap<TermId, Vec<TermId>> = HashMap::new();
+        let mut severity: HashMap<TermId, TermId> = HashMap::new();
         for (p, o) in g.predicate_objects(node) {
             let Some(triple) = self.store.get_triple_term(node, p, o) else {
                 continue;
             };
-            let messages: Vec<TermId> = g
-                .subjects(v.rdf_reifies, triple)
-                .flat_map(|r| g.objects(r, v.sh_message))
-                .collect();
-            if messages.is_empty() {
+            let reifiers: Vec<TermId> = g.subjects(v.rdf_reifies, triple).collect();
+            if reifiers.is_empty() {
                 continue;
             }
             let Some(local) = self
@@ -757,11 +775,23 @@ impl<'a> Compiler<'a> {
             component.push_str(chars.as_str());
             component.push_str("ConstraintComponent");
             let iri = format!("{}{component}", crate::model::vocab::SH);
-            if let Some(id) = self.store.get_named_node(&iri) {
-                out.entry(id).or_default().extend(messages);
+            let Some(id) = self.store.get_named_node(&iri) else {
+                continue;
+            };
+            for &r in &reifiers {
+                messages
+                    .entry(id)
+                    .or_default()
+                    .extend(g.objects(r, v.sh_message));
+                if let Some(s) = g.object(r, v.sh_severity) {
+                    severity.insert(id, s);
+                }
+            }
+            if messages.get(&id).is_some_and(Vec::is_empty) {
+                messages.remove(&id);
             }
         }
-        out
+        (messages, severity)
     }
 
     /// Reads a numeric literal, for `sh:order`.
@@ -1055,9 +1085,16 @@ impl<'a> Compiler<'a> {
         for t in self.objects_active(node, v.sh_maxListLength) {
             out.push(Constraint::MaxListLength(self.uint(t, "sh:maxListLength")?));
         }
+        let required = g
+            .object(node, v.sh_reificationRequired)
+            .and_then(|t| self.store.lexical_form(t))
+            .is_some_and(|s| s == "true");
         for t in self.objects_active(node, v.sh_reifierShape) {
             let id = self.shape_id(t)?;
-            out.push(Constraint::ReifierShape(id));
+            out.push(Constraint::ReifierShape {
+                shape: id,
+                required,
+            });
         }
         for t in self.objects_active(node, v.sh_memberShape) {
             let id = self.shape_id(t)?;

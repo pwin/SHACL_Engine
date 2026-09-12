@@ -738,7 +738,7 @@ impl Engine<'_> {
         stack.depth += 1;
 
         let mut frames: Vec<Frame> = Vec::new();
-        let mut outcome = self.push_frame(id, focus, stack, &mut frames);
+        let mut outcome = self.push_frame(id, focus, stack, &mut frames, store);
         if outcome.is_ok() {
             outcome = self.run_frames(&mut frames, out, stack, store);
         }
@@ -791,7 +791,7 @@ impl Engine<'_> {
                 Constraint::Property(inner) => {
                     let inner = *inner;
                     let values: Vec<TermId> = frames[i].sets.all_values().to_vec();
-                    self.push_frame(inner, &values, stack, frames)?;
+                    self.push_frame(inner, &values, stack, frames, store)?;
                 }
                 constraint => {
                     self.eval(shape, constraint, &frames[i].sets, out, stack, store)?;
@@ -808,6 +808,7 @@ impl Engine<'_> {
         focus: &[TermId],
         stack: &mut Stack,
         frames: &mut Vec<Frame>,
+        store: &mut TermStore,
     ) -> Result<()> {
         let shape = self.shapes.get(id);
         if shape.deactivated || focus.is_empty() {
@@ -841,9 +842,19 @@ impl Engine<'_> {
             &filtered
         };
 
-        let sets = match &shape.path {
-            Some(p) => p.eval_sets(focus, self.data),
-            None => ValueSets::identity(focus),
+        let sets = match (&shape.values, &shape.path) {
+            // `sh:values`: the node expression, evaluated with each focus node
+            // as `$this`, supplies the value nodes the path would have.
+            (Some(expr), _) => {
+                let mut b = ValueSets::builder();
+                for &f in focus {
+                    let values = self.eval_expr(*expr, f, store)?;
+                    b.push_row(f, &values);
+                }
+                b.finish()
+            }
+            (None, Some(p)) => p.eval_sets(focus, self.data),
+            (None, None) => ValueSets::identity(focus),
         };
 
         let mark = stack.pairs.len();
@@ -876,7 +887,12 @@ impl Engine<'_> {
 
     /// A result carrying the fields every violation of `shape` shares.
     fn result(&self, shape: &Shape, component: TermId, focus: TermId) -> ValidationResult {
-        let mut r = ValidationResult::new(focus, component, shape.severity)
+        let severity = shape
+            .component_severity
+            .get(&component)
+            .copied()
+            .unwrap_or(shape.severity);
+        let mut r = ValidationResult::new(focus, component, severity)
             .with_path(shape.path_node)
             .with_source_shape(shape.node);
         // A message annotated onto the constraint itself speaks for results
@@ -1214,7 +1230,10 @@ impl Engine<'_> {
             }
 
             // --- other
-            Constraint::ReifierShape(inner) => {
+            Constraint::ReifierShape {
+                shape: inner,
+                required,
+            } => {
                 // The annotation syntax `{| ... |}` produces a node that
                 // `rdf:reifies` the triple term, so the reifiers of a statement
                 // are found by looking that term up.
@@ -1223,10 +1242,20 @@ impl Engine<'_> {
                 };
                 for row in sets.rows() {
                     for &value in row.values {
-                        let Some(tt) = store.get_triple_term(row.focus, p, value) else {
+                        let reifiers: Vec<TermId> = store
+                            .get_triple_term(row.focus, p, value)
+                            .map(|tt| self.data.subjects(v.rdf_reifies, tt).collect())
+                            .unwrap_or_default();
+                        // `sh:reificationRequired true`: a statement nobody
+                        // reifies fails outright.
+                        if reifiers.is_empty() {
+                            if *required {
+                                out.push(
+                                    self.result(shape, component, row.focus).with_value(value),
+                                );
+                            }
                             continue;
-                        };
-                        let reifiers: Vec<TermId> = self.data.subjects(v.rdf_reifies, tt).collect();
+                        }
                         // Like `sh:node`, the nested results are not reported
                         // directly: a non-conforming reifier faults the value
                         // whose statement it annotates.

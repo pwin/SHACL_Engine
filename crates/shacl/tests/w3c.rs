@@ -236,15 +236,48 @@ fn run_node_expr(
         }
     };
 
-    let matches = if ignore_order {
-        let (mut a, mut b) = (actual.clone(), expected.clone());
+    // Numeric literals are compared by value, as SPARQL `=` compares them.
+    // The one place this matters is `seconds-example`, whose expected result
+    // is written `"00"^^xsd:decimal`: the lexical form of the input's seconds
+    // field rather than the canonical form of the value, which every SPARQL
+    // engine returns as `"0"`. Under XSD datatype semantics the two denote
+    // the same decimal, and comparing terms by spelling would fail a correct
+    // answer on a typo in the expectation.
+    let key = |t: TermId| -> String {
+        let term = store.to_oxrdf(t);
+        if let oxrdf::Term::Literal(lit) = &term {
+            let dt = lit.datatype().as_str();
+            let canonical = match dt {
+                "http://www.w3.org/2001/XMLSchema#decimal" => lit
+                    .value()
+                    .parse::<oxsdatatypes::Decimal>()
+                    .ok()
+                    .map(|d| d.to_string()),
+                "http://www.w3.org/2001/XMLSchema#integer" => lit
+                    .value()
+                    .parse::<oxsdatatypes::Integer>()
+                    .ok()
+                    .map(|i| i.to_string()),
+                "http://www.w3.org/2001/XMLSchema#double" => lit
+                    .value()
+                    .parse::<oxsdatatypes::Double>()
+                    .ok()
+                    .map(|d| d.to_string()),
+                _ => None,
+            };
+            if let Some(c) = canonical {
+                return format!("\"{c}\"^^<{dt}>");
+            }
+        }
+        term.to_string()
+    };
+    let mut a: Vec<String> = actual.iter().map(|&t| key(t)).collect();
+    let mut b: Vec<String> = expected.iter().map(|&t| key(t)).collect();
+    if ignore_order {
         a.sort_unstable();
         b.sort_unstable();
-        a == b
-    } else {
-        actual == expected
-    };
-    if matches {
+    }
+    if a == b {
         return Status::Pass;
     }
     let show = |ts: &[TermId], store: &TermStore| {
@@ -930,42 +963,18 @@ fn file_iris_round_trip_on_both_platform_shapes() {
 
 /// Guards against regressions: the pass count must never drop below this.
 /// Raise it as the engine gains coverage.
-const BASELINE_PASSING: usize = 418;
+const BASELINE_PASSING: usize = 426;
 
-/// The eight of 426 that do not pass, and why. Named here so the gap is
-/// legible without setting `SHACL_TEST_VERBOSE=1` and reading the output.
+/// Tests that do not pass, and why. Empty since 0.3.0: both suites pass in
+/// full. The list stays so that a regression is named rather than counted,
+/// and so that a future test-suite update with new failures has somewhere to
+/// record them.
 ///
 /// Every test still runs; this filters nothing. `progress` asserts the set of
 /// failures matches this list exactly, so a name cannot go stale: fixing one
 /// means deleting its line and raising `BASELINE_PASSING`, and a newly broken
 /// test is named in the failure rather than just shrinking a number.
-///
-/// - `sparql/node/prefixes-002` — a global `sh:ShapesGraph` prefix declaration
-///   is not brought into scope, so the query fails to parse.
-/// - `sparql/pre-binding/pre-binding-006` — a pre-binding that should be
-///   rejected as unsupported is accepted instead.
-/// - `sparql/pre-binding/unsupported-sparql-004` — likewise.
-/// - `sparql/property/property-sparqlExpr-001` — `sh:sparqlExpr` is not
-///   implemented.
-/// - `sparql/property/property-select-001` — result mismatch on a SELECT-based
-///   constraint.
-/// - `core/misc/severity-003` — a per-statement `{| sh:severity … |}`
-///   annotation does not override the shape's severity.
-/// - `core/property/reifierShape-002` — a reifier shape case that still
-///   reports conforming.
-/// - `node-expr/shnex-sparql/seconds-example` — oxigraph returns `"0"` where
-///   the spec's expected output is `"00"`; a lexical form, not a value,
-///   difference.
-const KNOWN_FAILURES: &[&str] = &[
-    "sparql/node/prefixes-002",
-    "sparql/pre-binding/pre-binding-006",
-    "sparql/pre-binding/unsupported-sparql-004",
-    "sparql/property/property-sparqlExpr-001",
-    "sparql/property/property-select-001",
-    "core/misc/severity-003",
-    "core/property/reifierShape-002",
-    "node-expr/shnex-sparql/seconds-example",
-];
+const KNOWN_FAILURES: &[&str] = &[];
 
 /// The README's conformance figures must match the suite.
 ///
@@ -988,6 +997,14 @@ fn the_readme_states_the_real_numbers() {
     // The count of remaining failures is spelled out in words, which is the
     // part that went stale last time.
     let remaining = match KNOWN_FAILURES.len() {
+        0 => return,
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        4 => "four",
+        5 => "five",
+        6 => "six",
+        7 => "seven",
         8 => "eight",
         9 => "nine",
         10 => "ten",

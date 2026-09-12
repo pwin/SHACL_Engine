@@ -108,6 +108,18 @@ fn eval_at(
         return Ok(focus.into_iter().collect());
     }
 
+    // SPARQL node expressions, from the SHACL 1.2 SPARQL extension: a
+    // SELECT query whose projected variable supplies the values, or a bare
+    // expression whose result is the single value. Both run with `$this`
+    // bound to the focus node and read `sh:prefixes` for their prefixes.
+    // Checked before the constant rule because such a node may be an IRI.
+    if let Some(query) = g.object(node, v.sh_select) {
+        return eval_select(node, query, focus, ctx, store);
+    }
+    if let Some(expr) = g.object(node, v.sh_sparqlExpr) {
+        return eval_sparql_expr(node, expr, focus, ctx, store);
+    }
+
     // Anything that is not a blank node carrying an operator is a constant
     // standing for itself.
     if !store.is_blank(node) {
@@ -588,6 +600,78 @@ fn all_nodes(g: &Graph) -> Vec<TermId> {
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// Evaluates an `sh:select` node expression: the bindings of the query's
+/// first projected variable, one value per solution, in solution order.
+fn eval_select(
+    node: TermId,
+    query_node: TermId,
+    focus: Option<TermId>,
+    ctx: &Ctx<'_>,
+    store: &mut TermStore,
+) -> Result<Vec<TermId>> {
+    let text = store
+        .lexical_form(query_node)
+        .ok_or_else(|| Error::Shape("sh:select must be a string".into()))?
+        .to_owned();
+    let header = crate::sparql::prefix_header(node, ctx.exprs, store, ctx.vocab);
+    let query = crate::sparql::parse_query(&header, &text)?;
+    let variable = crate::sparql::projected_variables(&query)
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            Error::Shape("an sh:select node expression must project a variable".into())
+        })?;
+    let bindings: Vec<(&str, oxrdf::Term)> = match focus {
+        Some(f) => vec![("this", crate::sparql::to_term(f, store))],
+        None => Vec::new(),
+    };
+    let rows = crate::sparql::run_in(&query, &bindings, ctx.data, store, Some(ctx.exprs))?;
+    let mut out = Vec::new();
+    for row in rows {
+        if let Some(term) = row.get(&variable) {
+            out.push(intern_result(term, store));
+        }
+    }
+    Ok(out)
+}
+
+/// Evaluates an `sh:sparqlExpr` node expression: a SPARQL expression over
+/// `$this`, wrapped as `SELECT (expr AS ?value) WHERE {}` so the query
+/// machinery, pre-binding included, does the work.
+fn eval_sparql_expr(
+    node: TermId,
+    expr_node: TermId,
+    focus: Option<TermId>,
+    ctx: &Ctx<'_>,
+    store: &mut TermStore,
+) -> Result<Vec<TermId>> {
+    let expr = store
+        .lexical_form(expr_node)
+        .ok_or_else(|| Error::Shape("sh:sparqlExpr must be a string".into()))?
+        .to_owned();
+    let header = crate::sparql::prefix_header(node, ctx.exprs, store, ctx.vocab);
+    let query =
+        crate::sparql::parse_query(&header, &format!("SELECT (({expr}) AS ?value) WHERE {{}}"))?;
+    let bindings: Vec<(&str, oxrdf::Term)> = match focus {
+        Some(f) => vec![("this", crate::sparql::to_term(f, store))],
+        None => Vec::new(),
+    };
+    let rows = crate::sparql::run_in(&query, &bindings, ctx.data, store, Some(ctx.exprs))?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.get("value"))
+        .map(|t| intern_result(t, store))
+        .collect())
+}
+
+/// A term a query produced, as an id. A value that already exists is found;
+/// one the query computed is interned in the SPARQL scope, since a node
+/// expression is entitled to produce values the data never held.
+fn intern_result(term: &oxrdf::Term, store: &mut TermStore) -> TermId {
+    crate::sparql::from_term(term.as_ref(), store)
+        .unwrap_or_else(|| store.intern_oxrdf(term.as_ref(), crate::model::scope::SPARQL))
 }
 
 /// The `sparql:` namespace, whose predicates name SPARQL functions.

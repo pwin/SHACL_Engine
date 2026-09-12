@@ -236,14 +236,14 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
     let mut seen = Vec::new();
     let mut queue: Vec<TermId> = shapes.objects(node, vocab.sh_prefixes).collect();
 
-    // With no `sh:prefixes` of its own, fall back to every prefix the shapes
-    // graph declares. SHACL says a query's prefixes come from `sh:prefixes`,
-    // but a graph that declares them at the top — `ex: a sh:ShapesGraph ;
-    // sh:declare [ … ]` — and writes `ex:` in a rule is a shape people
-    // actually write, and the W3C 1.2 suite contains one. Refusing it means
-    // refusing the whole shapes graph over a prefix that is right there.
+    // With no `sh:prefixes` of its own, a query takes the declarations made
+    // on the shapes graph as a whole: SHACL 1.2 lets a node typed
+    // `sh:ShapesGraph` carry `sh:declare` for every query in the graph.
+    // Only those nodes count. The suite's `prefixes-002` declares the same
+    // prefix a second time on an unrelated resource, and a fallback that
+    // took every `sh:declare` in the graph could pick the wrong one.
     if queue.is_empty() {
-        queue.extend(shapes.subjects_of(vocab.sh_declare));
+        queue.extend(shapes.subjects(vocab.rdf_type, vocab.sh_ShapesGraph));
     }
 
     while let Some(owner) = queue.pop() {
@@ -271,10 +271,11 @@ pub fn prefix_header(node: TermId, shapes: &Graph, store: &TermStore, vocab: &Vo
 
 /// Rejects queries SHACL declares incompatible with pre-binding.
 ///
-/// The spec rules out `VALUES`, `MINUS` and `SERVICE` outright, and forbids
-/// re-binding a pre-bound variable with `BIND`. These are failures rather than
-/// violations: the shape cannot be evaluated at all, so answering either way
-/// would be a guess.
+/// SHACL 5.3.2 rules out `VALUES`, `MINUS` and `SERVICE` outright, forbids
+/// re-binding a pre-bound variable with `BIND ... AS`, and requires every
+/// subquery to return the pre-bound variables. These are failures rather
+/// than violations: the shape cannot be evaluated at all, so answering
+/// either way would be a guess.
 fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
     let pattern = match query {
         Query::Select { pattern, .. }
@@ -283,7 +284,7 @@ fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
         _ => return Ok(()),
     };
     let names: Vec<&str> = bindings.iter().map(|(n, _)| *n).collect();
-    if let Some(what) = unsupported_in(pattern, &names) {
+    if let Some(what) = unsupported_in(pattern, &names, true) {
         return Err(Error::Sparql(format!(
             "{what} cannot be combined with SHACL pre-binding"
         )));
@@ -291,9 +292,15 @@ fn reject_unsupported(query: &Query, bindings: &[(&str, Term)]) -> Result<()> {
     Ok(())
 }
 
-fn unsupported_in(p: &spargebra::algebra::GraphPattern, prebound: &[&str]) -> Option<&'static str> {
+/// `outermost` is true until the query's own projection has been passed;
+/// any `Project` met after that is a subquery.
+fn unsupported_in(
+    p: &spargebra::algebra::GraphPattern,
+    prebound: &[&str],
+    outermost: bool,
+) -> Option<&'static str> {
     use spargebra::algebra::GraphPattern as G;
-    let recurse = |x: &G| unsupported_in(x, prebound);
+    let recurse = |x: &G| unsupported_in(x, prebound, false);
     match p {
         G::Values { .. } => Some("VALUES"),
         G::Minus { .. } => Some("MINUS"),
@@ -306,17 +313,32 @@ fn unsupported_in(p: &spargebra::algebra::GraphPattern, prebound: &[&str]) -> Op
             }
             recurse(inner)
         }
+        G::Project { inner, variables } => {
+            // A subquery must return `$this`, so the pre-binding reaches it.
+            // The suite's `pre-binding-006` (a `SELECT *` over a pattern that
+            // binds nothing) and `unsupported-sparql-004` (a projection of
+            // other variables) are both refused; `pre-binding-007`, whose
+            // subquery projects `$this` alone, is accepted. Only `$this` is
+            // required: the other pre-bound variables need not be projected
+            // to be usable, and requiring them would refuse that test.
+            if !outermost
+                && prebound.contains(&"this")
+                && !variables.iter().any(|v| v.as_str() == "this")
+            {
+                return Some("a subquery that does not return $this");
+            }
+            recurse(inner)
+        }
         G::Join { left, right } | G::Union { left, right } | G::LeftJoin { left, right, .. } => {
             recurse(left).or_else(|| recurse(right))
         }
-        G::Filter { inner, .. }
-        | G::Graph { inner, .. }
-        | G::OrderBy { inner, .. }
-        | G::Project { inner, .. }
+        // LIMIT, DISTINCT and ORDER BY sit above the query's own projection,
+        // so passing through them does not leave the outermost level.
+        G::OrderBy { inner, .. }
         | G::Distinct { inner }
         | G::Reduced { inner }
-        | G::Slice { inner, .. }
-        | G::Group { inner, .. } => recurse(inner),
+        | G::Slice { inner, .. } => unsupported_in(inner, prebound, outermost),
+        G::Filter { inner, .. } | G::Graph { inner, .. } | G::Group { inner, .. } => recurse(inner),
         _ => None,
     }
 }
@@ -844,6 +866,32 @@ impl SparqlConstraint {
 
 /// An empty solution, used to stand for the single failure an unsatisfied
 /// `sh:ask` produces.
+/// The variables a SELECT query projects, in order. Empty for `SELECT *`,
+/// which projects whatever the pattern binds, and for ASK and CONSTRUCT.
+pub fn projected_variables(query: &Query) -> Vec<String> {
+    use spargebra::algebra::GraphPattern as G;
+    let Query::Select { pattern, .. } = query else {
+        return Vec::new();
+    };
+    // The projection is the outermost operator, possibly under a slice or
+    // ordering, which is what LIMIT and ORDER BY compile to.
+    let mut at = pattern;
+    loop {
+        match at {
+            G::Project { variables, .. } => {
+                return variables.iter().map(|v| v.as_str().to_owned()).collect();
+            }
+            G::Slice { inner, .. }
+            | G::Distinct { inner }
+            | G::Reduced { inner }
+            | G::OrderBy { inner, .. } => {
+                at = inner;
+            }
+            _ => return Vec::new(),
+        }
+    }
+}
+
 pub fn empty_solution() -> HashMap<String, Term> {
     HashMap::new()
 }
@@ -921,9 +969,11 @@ mod tests {
         let a = store.named_node("http://ex/a");
         let this = to_term(a, &store);
 
-        // `$this` appears only inside the subquery. Substitution pins it to
-        // ex:a, giving one row; leaving it free gives every ex:p statement.
-        let text = "SELECT ?v WHERE { { SELECT ?v WHERE { $this <http://ex/p> ?v } } }";
+        // `$this` appears only inside the subquery, which projects it as
+        // SHACL requires of a subquery (see `reject_unsupported`); the outer
+        // query does not. Substitution pins it to ex:a, giving one row;
+        // leaving it free gives every ex:p statement.
+        let text = "SELECT ?v WHERE { { SELECT $this ?v WHERE { $this <http://ex/p> ?v } } }";
         let q = parse_query("", text).unwrap();
 
         // What this module does today.

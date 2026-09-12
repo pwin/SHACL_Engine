@@ -268,12 +268,19 @@ sequence. Expected and actual reports are compared two ways — result by
 result through one in-memory representation, and as RDF graphs the way the
 suite itself specifies (below) — and both have to agree.
 
-**418 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
+**426 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
 SPARQL-based constraints with pre-binding, user-declared constraint components,
-the node expression algebra, SPARQL-selected targets and RDF 1.2 annotations are
-all implemented. The eight that remain are named, with the reason for each, in
-`KNOWN_FAILURES` in `tests/w3c.rs` — the suite asserts that list matches what
-actually fails, so it cannot drift.
+the node expression algebra including its SPARQL forms, SPARQL-selected targets,
+`sh:values`, and RDF 1.2 annotations are all implemented. `KNOWN_FAILURES` in
+`tests/w3c.rs` is empty; the suite asserts that the set of failing tests matches
+that list exactly, so a regression is reported by name.
+
+The last eight were fixed in 0.3.0: per-constraint `sh:severity` annotations,
+`sh:reificationRequired`, `sh:values` with `sh:select` and `sh:sparqlExpr`,
+global prefix declarations on an `sh:ShapesGraph` node, and the rule that a
+subquery must return `$this`. One test, `seconds-example`, expects the decimal
+zero spelled `"00"`; the harness compares numeric literals by value, as SPARQL
+does, and the test passes on the value rather than on the spelling.
 
 ### Compared the way the suite compares
 
@@ -290,14 +297,13 @@ The harness now runs that comparison alongside its own, reports both, and
 asserts they agree on every passing test:
 
 ```
-  shacl10    118/120 passing  (0 could not run)   as graphs: 113/113
-  shacl12    300/306 passing  (0 could not run)   as graphs: 153/158
-  TOTAL      418/426 passing                        as graphs: 266/271
+  shacl10    120/120 passing  (0 could not run)   as graphs: 113/113
+  shacl12    306/306 passing  (0 could not run)   as graphs: 158/158
+  TOTAL      426/426 passing                        as graphs: 271/271
 ```
 
-The second column counts the tests that produce a report at all — the rest
-expect a failure, or evaluate a node expression — and the five it does not
-reach are five of the eight known failures.
+The second column counts the tests that produce a report at all; the rest
+expect a failure, or evaluate a node expression.
 
 Adding it found six deviations the per-result comparison had let through for
 every release so far, each a report that was right result by result and wrong
@@ -714,7 +720,7 @@ under [where rule authors have to be careful](#where-rule-authors-have-to-be-car
 An unrecognised mode is an error rather than a silent `none`.
 
 `parallel` is off in this build — there are no threads to split a parse
-across — so it takes the sequential path. Conformance is the same 418 of 426
+across — so it takes the sequential path. Conformance is the same 426 of 426
 either way, and the WebAssembly build is checked against the native one over
 every document in the W3C suite; see `crates/shacl-wasm/differential.js`.
 

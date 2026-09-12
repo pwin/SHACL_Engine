@@ -40,6 +40,7 @@ vocab! {
         sh_NodeShape = "NodeShape",
         sh_PropertyShape = "PropertyShape",
         sh_ShapeClass = "ShapeClass",
+        sh_ShapesGraph = "ShapesGraph",
         sh_property = "property",
         sh_path = "path",
         sh_deactivated = "deactivated",
@@ -149,6 +150,7 @@ vocab! {
         sh_expression = "expression",
         sh_nodeByExpression = "nodeByExpression",
         sh_sparqlExpr = "sparqlExpr",
+        sh_values = "values",
         sh_nodeShape = "nodeShape",
         sh_shape = "shape",
 
