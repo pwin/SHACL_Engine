@@ -39,6 +39,51 @@ quadratic in the number of focus nodes — 44 seconds at that size, for several
 releases. `tests/scaling.rs` now asserts the shape of that curve, because a
 benchmark nobody re-runs is a claim rather than a check.
 
+### Since that table
+
+Three things now take the 100k run below what it shows, each measured in one
+session on the same machine so they compare with each other rather than with
+the table (which was a different day, and a slower one):
+
+| 100k instances, whole process | wall |
+| --- | ---: |
+| parse, one thread | 0.61s |
+| parse, all cores | 0.57s |
+| [cached index](#caching-the-parsed-graph), one thread | 0.26s |
+| cached index, all cores — the defaults | **0.23s** |
+
+**The index cache** is most of it. **Parallel validation** takes the validate
+phase itself from 0.14s to 0.05s on four cores, which shows up as less than
+that end to end because what remains is reading the index and writing a
+1.3 MB report — a run with fewer violations would see more of it. And a
+**first-level index on each permutation** — one array load per subject
+instead of a binary search over the whole graph — took the sequential validate
+phase down by a fifth. The last is the first level of the trie the
+[HOLOS](https://github.com/pwin/new_triplestore_sparql_engine) store builds
+over this engine's design, and reading that design is where two of the three
+came from.
+
+What was *not* done is as informative. HOLOS inlines integers, floats and
+dates into the term id so that comparing them never touches the dictionary,
+and it looked like the obvious lesson to take. Measured per constraint on the
+benchmark, the `sh:minInclusive`/`sh:maxInclusive` shape costs 22ms of 115 and
+the regex 16ms; the cost is spread evenly across every constraint at about
+two cache misses each, and no single one is worth an encoding change. The
+profile is in the commit that added the index, and it is the reason the
+parallel curve flattens on four cores rather than climbing: more threads
+share the same memory system.
+
+`--threads N` sets the worker count; `1` is sequential. Only a SHACL Core
+shapes graph splits — one using `sh:sparql`, a SPARQL-based constraint
+component, node expressions, `sh:uniqueValuesFor`, or a shape that can reach
+itself runs sequentially whatever is asked, because each of those makes a
+focus set more than the sum of its nodes. The report is the same either way,
+byte for byte: results are returned in an order that depends on what they say
+rather than on how they were produced, so the same graph gives the same bytes
+on a machine with a different number of cores. That order is by focus node
+first — a change from earlier releases, where it followed the traversal and
+grouped by constraint — and `tests/parallel.rs` holds a split run to it.
+
 ## Design
 
 Three decisions carry most of the performance:
@@ -101,6 +146,13 @@ constraint, or changing the order shapes compile in, changes which result is
 deliberately, but it does mean a report checked into version control can move
 under a version bump. Compare reports from one version, or compare them as
 graphs rather than as text.
+
+That acceptance happened once, in 0.3.0. Results used to come out in the
+order validation met them, which grouped them by constraint; they now come out
+by focus node, with everything about one node together. The reason was not
+tidiness: validation had started running across threads, and the order it
+meets results in then depends on how many threads there are. Sorting by
+content is what keeps "the same bytes on any machine" true.
 
 ## Inputs
 

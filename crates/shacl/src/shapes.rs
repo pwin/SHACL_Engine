@@ -358,6 +358,145 @@ impl Shapes {
         self.shapes.iter().any(|s| !s.rules.is_empty())
     }
 
+    /// True when validating can add terms to the store.
+    ///
+    /// SHACL Core reads the store and never writes it: every constraint
+    /// compares ids that already exist. Four things break that — a SPARQL
+    /// constraint, a SPARQL-based constraint component, a node expression,
+    /// and a SPARQL target — because a query or expression can produce a
+    /// value the data never contained, which then has to be interned to be
+    /// reported.
+    pub fn mints_terms(&self) -> bool {
+        self.shapes.iter().any(|s| {
+            s.targets.iter().any(|t| matches!(t, Target::Sparql(_)))
+                || s.constraints.iter().any(|c| {
+                    matches!(
+                        c,
+                        Constraint::Sparql(_)
+                            | Constraint::Custom(_)
+                            | Constraint::Expression(_)
+                            | Constraint::NodeByExpression(_)
+                    )
+                })
+        })
+    }
+
+    /// True when a root shape's focus set can be validated in pieces and the
+    /// pieces' results concatenated, with nothing changed.
+    ///
+    /// Three things make it false, and each is a different way the engine
+    /// treats a focus set as more than its nodes:
+    ///
+    /// * **The store is written** ([`Shapes::mints_terms`]). Pieces validated
+    ///   against separate stores would report ids the caller's store does
+    ///   not hold.
+    /// * **A constraint reads across focus nodes.** `sh:uniqueValuesFor` is a
+    ///   property of the set as a whole — a clash between two nodes in
+    ///   different pieces would go unseen.
+    /// * **A shape can reach itself.** The recursion guard filters a node the
+    ///   same shape is already validating further up the descent. A
+    ///   property shape evaluates its path over the whole focus set at once,
+    ///   so the sequential run's second level sees every value already on
+    ///   the stack and stops; a piece's second level walks on into the next
+    ///   piece's nodes, one at a time, until the depth limit. The guard only
+    ///   ever filters when a shape is its own ancestor, so a shapes graph
+    ///   with no cycle among its shape references validates identically in
+    ///   pieces — and that is the common shape of a shapes graph.
+    ///
+    /// This is what decides whether validation runs across threads.
+    pub fn is_focus_separable(&self) -> bool {
+        if self.mints_terms() {
+            return false;
+        }
+        if self.shapes.iter().any(|s| {
+            s.constraints
+                .iter()
+                .any(|c| matches!(c, Constraint::UniqueValuesFor(_)))
+        }) {
+            return false;
+        }
+        !self.has_cycle()
+    }
+
+    /// Whether any shape reaches itself through the shapes it refers to.
+    ///
+    /// A three-colour depth-first search over every shape-valued constraint,
+    /// plus `sh:targetWhere`, which validates against a shape by node.
+    fn has_cycle(&self) -> bool {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Mark {
+            White,
+            Grey,
+            Black,
+        }
+        let n = self.shapes.len();
+        let mut mark = vec![Mark::White; n];
+        // Explicit stack of (shape, next child index), so a shapes graph deep
+        // enough to overflow the call stack is handled the way the compiler
+        // and the validator already handle it.
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        for start in 0..n {
+            if mark[start] != Mark::White {
+                continue;
+            }
+            mark[start] = Mark::Grey;
+            stack.push((start, 0));
+            while let Some(&mut (at, ref mut next)) = stack.last_mut() {
+                let children = self.referenced_shapes(ShapeId(at as u32));
+                if *next < children.len() {
+                    let child = children[*next].index();
+                    *next += 1;
+                    match mark[child] {
+                        Mark::Grey => return true,
+                        Mark::White => {
+                            mark[child] = Mark::Grey;
+                            stack.push((child, 0));
+                        }
+                        Mark::Black => {}
+                    }
+                } else {
+                    mark[at] = Mark::Black;
+                    stack.pop();
+                }
+            }
+        }
+        false
+    }
+
+    /// Every shape `id` refers to directly.
+    fn referenced_shapes(&self, id: ShapeId) -> Vec<ShapeId> {
+        let shape = self.get(id);
+        let mut out = Vec::new();
+        for c in &shape.constraints {
+            match c {
+                Constraint::Not(s)
+                | Constraint::Node(s)
+                | Constraint::Property(s)
+                | Constraint::ReifierShape(s)
+                | Constraint::MemberShape(s)
+                | Constraint::SomeValue(s) => out.push(*s),
+                Constraint::And(v) | Constraint::Or(v) | Constraint::Xone(v) => {
+                    out.extend(v.iter().copied())
+                }
+                Constraint::QualifiedValueShape {
+                    shape, siblings, ..
+                } => {
+                    out.push(*shape);
+                    out.extend(siblings.iter().copied());
+                }
+                _ => {}
+            }
+        }
+        for t in &shape.targets {
+            if let Target::Where(node) = t
+                && let Some(s) = self.id_of(*node)
+            {
+                out.push(s);
+            }
+        }
+        out
+    }
+
     #[inline]
     pub fn get(&self, id: ShapeId) -> &Shape {
         &self.shapes[id.index()]

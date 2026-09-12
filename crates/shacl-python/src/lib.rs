@@ -437,6 +437,7 @@ impl Shapes {
         let options = engine::validate::Options {
             max_results,
             blocking: Some(vec![vocab.sh_Violation]),
+            threads: 0,
         };
         let report = engine::validate::validate_in_with(
             data,

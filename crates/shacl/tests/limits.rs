@@ -156,6 +156,7 @@ ex:S a sh:NodeShape ; sh:targetNode ex:a, ex:b, ex:c, ex:d ;
         f.run(Options {
             max_results: Some(2),
             blocking: Some(blocking),
+            threads: 0,
         })
         .results
         .len(),

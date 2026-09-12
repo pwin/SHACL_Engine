@@ -65,6 +65,16 @@ struct Args {
     #[arg(long)]
     no_index: bool,
 
+    /// Worker threads for validation. `0` uses every core; `1` runs
+    /// sequentially.
+    ///
+    /// Only a SHACL Core shapes graph splits across threads. One using
+    /// `sh:sparql`, a SPARQL-based constraint component or node expressions
+    /// runs sequentially whatever this says, as does any run with
+    /// `--max-results`. The report is the same either way, byte for byte.
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    threads: usize,
+
     /// Write the report to a file rather than standard output.
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -916,6 +926,7 @@ fn run() -> Result<bool> {
     let options = shacl::validate::Options {
         max_results,
         blocking: Some(disallowed.clone()),
+        threads: args.threads,
     };
 
     let t2 = Instant::now();

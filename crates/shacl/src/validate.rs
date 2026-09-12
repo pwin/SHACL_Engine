@@ -75,12 +75,20 @@ pub fn validate_in_with(
     };
     let mut results = Vec::new();
     let mut stack = Stack::default();
-    for &root in shapes.roots() {
-        if engine.enough(&results) {
-            break;
+
+    #[cfg(feature = "parallel")]
+    let split = engine.validate_roots_parallel(&options, &mut results, &mut stack, store)?;
+    #[cfg(not(feature = "parallel"))]
+    let split = false;
+
+    if !split {
+        for &root in shapes.roots() {
+            if engine.enough(&results) {
+                break;
+            }
+            let focus = engine.focus_nodes(shapes.get(root), &mut stack, store)?;
+            engine.validate_shape(root, &focus, &mut results, &mut stack, store)?;
         }
-        let focus = engine.focus_nodes(shapes.get(root), &mut stack, store)?;
-        engine.validate_shape(root, &focus, &mut results, &mut stack, store)?;
     }
 
     // A data node may nominate its own shape with `sh:shape`. This is a target
@@ -125,6 +133,67 @@ pub fn validate_in_with(
             None => results.truncate(n),
         }
     }
+    // Into content order — see `ValidationResult`. Results arrive in traversal
+    // order, which is constraint-major within a shape and, when the run was
+    // split across threads, chunk-major before that. Neither is a property of
+    // the data. Sorting after the cap, not before, keeps `max_results` meaning
+    // "the first n the traversal met", which is what an early exit can offer.
+    results.sort_unstable();
+    Ok(ValidationReport { results })
+}
+
+/// Validates a chosen set of (shape, focus node) pairs, and nothing else.
+///
+/// [`validate`] resolves every shape's targets and validates all of them, which
+/// is the right thing for a document seen once. It is the wrong thing for a
+/// graph that changes a little at a time: a caller holding a delta can work out
+/// which focus nodes it could have touched, and wants to revalidate those —
+/// so the cost tracks the size of the change, not the size of the graph.
+///
+/// Focus nodes are *not* re-derived from targets. The caller has already
+/// decided which nodes are stale, and re-resolving targets would walk the
+/// whole graph again and undo the point of asking. It is also the unit a
+/// parallel validator divides work into.
+///
+/// Written for the HOLOS store's incremental revalidation, which drives it at
+/// 161× the cost of a full pass on a one-triple change, and taken upstream so
+/// that adaptation no longer needs its own copy of the engine.
+pub fn validate_nodes(
+    work: &[(ShapeId, TermId)],
+    data: &Graph,
+    shapes: &Shapes,
+    shapes_graph: &Graph,
+    store: &mut TermStore,
+    vocab: &Vocab,
+) -> Result<ValidationReport> {
+    let engine = Engine {
+        data,
+        shapes,
+        shapes_graph,
+        vocab,
+        shnex: crate::nodeexpr::Shnex::new(store),
+        max_results: None,
+        blocking: None,
+    };
+    // Grouped so each shape is entered once with all of its focus nodes, which
+    // is how `validate_shape` expects to be called.
+    let mut grouped: Vec<(ShapeId, Vec<TermId>)> = Vec::new();
+    for (shape, node) in work {
+        match grouped.iter_mut().find(|(s, _)| s == shape) {
+            Some((_, nodes)) => nodes.push(*node),
+            None => grouped.push((*shape, vec![*node])),
+        }
+    }
+    let mut results = Vec::new();
+    let mut stack = Stack::default();
+    for (shape, mut nodes) in grouped {
+        nodes.sort_unstable();
+        nodes.dedup();
+        engine.validate_shape(shape, &nodes, &mut results, &mut stack, store)?;
+    }
+    // The same order a full run returns, so a partial report reads as a
+    // slice of one.
+    results.sort_unstable();
     Ok(ValidationReport { results })
 }
 
@@ -224,6 +293,20 @@ pub struct Options {
     /// evaluated in whatever order they compiled in, so which kind is met
     /// first says nothing about what is in the graph.
     pub blocking: Option<Vec<TermId>>,
+
+    /// Worker threads to split validation across. `0` uses every core; `1`
+    /// runs sequentially.
+    ///
+    /// Only a SHACL Core shapes graph splits — see [`Shapes::mints_terms`]
+    /// — and only without `max_results`, whose early exit is an order of
+    /// events that parallel work has no equivalent for. Either falls back to
+    /// the sequential path, which produces the same report; parallelism here
+    /// changes how long a report takes and nothing about what it says, and
+    /// `tests/parallel.rs` holds it to that byte for byte.
+    ///
+    /// Ignored, and sequential, when the crate is built without the
+    /// `parallel` feature.
+    pub threads: usize,
 }
 
 impl Options {
@@ -232,6 +315,7 @@ impl Options {
         Self {
             max_results: Some(1),
             blocking: Some(severities),
+            threads: 0,
         }
     }
 }
@@ -322,6 +406,107 @@ fn unwind(stack: &mut Stack, mark: usize) {
 }
 
 const MAX_DEPTH: usize = 48;
+
+/// Focus sets smaller than this, in total, are validated sequentially.
+///
+/// Splitting costs a store clone and a thread hand-off per worker — about
+/// 6 ms of clone on 690k triples, microseconds on a small graph — and a run
+/// this short does not earn it back.
+#[cfg(feature = "parallel")]
+const PARALLEL_MIN_FOCUS: usize = 4096;
+
+#[cfg(feature = "parallel")]
+impl Engine<'_> {
+    /// Validates every root shape's targets across worker threads.
+    ///
+    /// Returns `Ok(false)` having done nothing when the run does not qualify,
+    /// so the caller takes the sequential path. A run qualifies when its
+    /// focus sets can be validated in pieces with nothing changed — which is
+    /// [`Shapes::is_focus_separable`]'s question, and it lists the three
+    /// things that make the answer no — and when there is no `max_results`,
+    /// whose early exit is an order of events that parallel work has no
+    /// equivalent of.
+    ///
+    /// **Each worker validates against its own clone of the store.** That is
+    /// cheaper than it sounds: the clone is a memcpy of the arena and a few
+    /// vectors, measured at 6 ms for 690k triples, and it is the whole reason
+    /// no signature in the engine had to change. A separable run never writes
+    /// the store, so a clone's ids are the caller's ids, and every result a
+    /// worker produces refers to terms the caller's store already holds.
+    ///
+    /// **The report is the sequential report, byte for byte.** Tasks are
+    /// contiguous slices of each root's sorted focus set, in root order, and
+    /// their results are concatenated in task order — the order the
+    /// sequential loop would have produced them in. Separability is what
+    /// makes that enough: with no cross-node constraint and no shape able to
+    /// reach itself, what a node reports depends on that node alone.
+    /// `tests/parallel.rs` holds the two reports equal, and checks that the
+    /// shapes graphs which would break it are the ones that decline.
+    ///
+    /// Measured on 100k instances and 4 physical cores: 0.13 s sequential to
+    /// 0.06 s. Sublinear, and the curve flattens rather than climbs, because
+    /// the work is bound by cache misses on the row and term arrays rather
+    /// than by arithmetic — more cores share the same memory system.
+    fn validate_roots_parallel(
+        &self,
+        options: &Options,
+        out: &mut Vec<ValidationResult>,
+        stack: &mut Stack,
+        store: &mut TermStore,
+    ) -> Result<bool> {
+        use rayon::prelude::*;
+
+        let threads = match options.threads {
+            0 => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            n => n,
+        };
+        if threads < 2 || options.max_results.is_some() || !self.shapes.is_focus_separable() {
+            return Ok(false);
+        }
+
+        // Targets are resolved sequentially: 2 ms of 130 on the benchmark.
+        let mut per_root: Vec<(ShapeId, Vec<TermId>)> = Vec::new();
+        for &root in self.shapes.roots() {
+            let focus = self.focus_nodes(self.shapes.get(root), stack, store)?;
+            per_root.push((root, focus));
+        }
+        let total: usize = per_root.iter().map(|(_, f)| f.len()).sum();
+        if total < PARALLEL_MIN_FOCUS {
+            // Validate from the focus sets already in hand rather than hand
+            // back and have the sequential loop resolve them again.
+            for (root, focus) in &per_root {
+                self.validate_shape(*root, focus, out, stack, store)?;
+            }
+            return Ok(true);
+        }
+
+        let per_task = total.div_ceil(threads).max(1);
+        let tasks: Vec<(ShapeId, &[TermId])> = per_root
+            .iter()
+            .flat_map(|(root, focus)| focus.chunks(per_task).map(move |chunk| (*root, chunk)))
+            .collect();
+
+        let shared: &TermStore = store;
+        let outcomes: Vec<Result<Vec<ValidationResult>>> = tasks
+            .par_iter()
+            .map_init(
+                || shared.clone(),
+                |local_store, &(root, chunk)| {
+                    let mut local = Vec::new();
+                    let mut guard = Stack::default();
+                    self.validate_shape(root, chunk, &mut local, &mut guard, local_store)?;
+                    Ok(local)
+                },
+            )
+            .collect();
+        for outcome in outcomes {
+            out.extend(outcome?);
+        }
+        Ok(true)
+    }
+}
 
 impl Engine<'_> {
     /// Whether enough results are in hand to stop.

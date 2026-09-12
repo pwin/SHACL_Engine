@@ -88,40 +88,48 @@ _:r0 <http://www.w3.org/ns/shacl#result> _:r4 .
 _:r0 <http://www.w3.org/ns/shacl#result> _:r5 .
 _:r1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationResult> .
 _:r1 <http://www.w3.org/ns/shacl#focusNode> <http://example.org/ns#alice> .
-_:r1 <http://www.w3.org/ns/shacl#resultPath> <http://example.org/ns#age> .
+_:r1 <http://www.w3.org/ns/shacl#resultPath> <http://example.org/ns#name> .
 _:r1 <http://www.w3.org/ns/shacl#resultSeverity> <http://www.w3.org/ns/shacl#Violation> .
-_:r1 <http://www.w3.org/ns/shacl#sourceConstraintComponent> <http://www.w3.org/ns/shacl#DatatypeConstraintComponent> .
-_:r1 <http://www.w3.org/ns/shacl#sourceShape> _:1_b1 .
-_:r1 <http://www.w3.org/ns/shacl#value> \"old\" .
+_:r1 <http://www.w3.org/ns/shacl#sourceConstraintComponent> <http://www.w3.org/ns/shacl#MinCountConstraintComponent> .
+_:r1 <http://www.w3.org/ns/shacl#sourceShape> _:1_b2 .
 _:r2 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationResult> .
-_:r2 <http://www.w3.org/ns/shacl#focusNode> _:0_b0 .
+_:r2 <http://www.w3.org/ns/shacl#focusNode> <http://example.org/ns#alice> .
 _:r2 <http://www.w3.org/ns/shacl#resultPath> <http://example.org/ns#age> .
 _:r2 <http://www.w3.org/ns/shacl#resultSeverity> <http://www.w3.org/ns/shacl#Violation> .
 _:r2 <http://www.w3.org/ns/shacl#sourceConstraintComponent> <http://www.w3.org/ns/shacl#DatatypeConstraintComponent> .
 _:r2 <http://www.w3.org/ns/shacl#sourceShape> _:1_b1 .
-_:r2 <http://www.w3.org/ns/shacl#value> \"young\" .
+_:r2 <http://www.w3.org/ns/shacl#value> \"old\" .
 _:r3 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationResult> .
-_:r3 <http://www.w3.org/ns/shacl#focusNode> <http://example.org/ns#alice> .
+_:r3 <http://www.w3.org/ns/shacl#focusNode> <http://example.org/ns#bob> .
 _:r3 <http://www.w3.org/ns/shacl#resultPath> <http://example.org/ns#name> .
 _:r3 <http://www.w3.org/ns/shacl#resultSeverity> <http://www.w3.org/ns/shacl#Violation> .
 _:r3 <http://www.w3.org/ns/shacl#sourceConstraintComponent> <http://www.w3.org/ns/shacl#MinCountConstraintComponent> .
 _:r3 <http://www.w3.org/ns/shacl#sourceShape> _:1_b2 .
 _:r4 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationResult> .
-_:r4 <http://www.w3.org/ns/shacl#focusNode> <http://example.org/ns#bob> .
+_:r4 <http://www.w3.org/ns/shacl#focusNode> _:0_b0 .
 _:r4 <http://www.w3.org/ns/shacl#resultPath> <http://example.org/ns#name> .
 _:r4 <http://www.w3.org/ns/shacl#resultSeverity> <http://www.w3.org/ns/shacl#Violation> .
 _:r4 <http://www.w3.org/ns/shacl#sourceConstraintComponent> <http://www.w3.org/ns/shacl#MinCountConstraintComponent> .
 _:r4 <http://www.w3.org/ns/shacl#sourceShape> _:1_b2 .
 _:r5 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationResult> .
 _:r5 <http://www.w3.org/ns/shacl#focusNode> _:0_b0 .
-_:r5 <http://www.w3.org/ns/shacl#resultPath> <http://example.org/ns#name> .
+_:r5 <http://www.w3.org/ns/shacl#resultPath> <http://example.org/ns#age> .
 _:r5 <http://www.w3.org/ns/shacl#resultSeverity> <http://www.w3.org/ns/shacl#Violation> .
-_:r5 <http://www.w3.org/ns/shacl#sourceConstraintComponent> <http://www.w3.org/ns/shacl#MinCountConstraintComponent> .
-_:r5 <http://www.w3.org/ns/shacl#sourceShape> _:1_b2 .
+_:r5 <http://www.w3.org/ns/shacl#sourceConstraintComponent> <http://www.w3.org/ns/shacl#DatatypeConstraintComponent> .
+_:r5 <http://www.w3.org/ns/shacl#sourceShape> _:1_b1 .
+_:r5 <http://www.w3.org/ns/shacl#value> \"young\" .
 ";
     let actual = report(RdfFormat::NTriples);
+    // To re-pin after a change accepted deliberately — see the README on what
+    // is and is not promised between releases:
+    //   SHACL_PRINT_REPORT=1 cargo test -p shacl --test determinism -- --nocapture
+    if std::env::var_os("SHACL_PRINT_REPORT").is_some() {
+        eprintln!("{actual}");
+    }
     // Compared as sets of lines first: an ordering change and a content change
     // are different bugs, and the assertion should say which one happened.
+    // A reordering renumbers the `_:rN` labels too, so it shows up here as
+    // well; the message names the first assertion that failed.
     let a: std::collections::BTreeSet<_> = actual.lines().collect();
     let e: std::collections::BTreeSet<_> = expected.lines().collect();
     assert_eq!(a, e, "the report's content changed");

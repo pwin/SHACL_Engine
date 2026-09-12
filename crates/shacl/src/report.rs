@@ -11,7 +11,15 @@ pub use oxrdfio::{JsonLdProfileSet, RdfFormat};
 use crate::model::{Graph, TermId, TermStore, Vocab};
 
 /// One SHACL validation result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Ordered — and the field order below is the sort order — so a report can be
+/// put into an order that depends on what it says rather than on how it was
+/// produced. Focus node first, so everything reported about one node sits
+/// together; then the value, path and shape that distinguish two results on
+/// the same node. Validation sorts its results before returning them, which
+/// is what lets a run split across threads produce the same bytes as one that
+/// did not, and the same bytes on a machine with a different number of cores.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ValidationResult {
     pub focus_node: TermId,
     /// The offending value, absent for constraints that fault the focus node
