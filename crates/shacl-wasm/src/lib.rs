@@ -237,7 +237,7 @@ impl Validator {
 
     fn build_report(&self, report: ValidationReport, store: &TermStore) -> Result<Report, JsValue> {
         let disallowed = [self.vocab.sh_Violation];
-        let conforms = report.conforms(&disallowed);
+        let conforms = report.conforms(&disallowed, &self.vocab);
         let turtle = report
             .serialize(
                 oxrdf_turtle(),

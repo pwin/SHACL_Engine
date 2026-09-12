@@ -109,6 +109,7 @@ class Shapes:
         path: str,
         inference: str = "none",
         max_results: int | None = None,
+        allow_warnings: bool = False,
     ) -> Report:
         """Validates a data graph read from a file.
 
@@ -126,6 +127,7 @@ class Shapes:
         base: str = "http://example.org/data",
         inference: str = "none",
         max_results: int | None = None,
+        allow_warnings: bool = False,
     ) -> Report:
         """Validates a data graph held in memory as Turtle.
 
@@ -144,6 +146,7 @@ class Shapes:
         base: str = "http://example.org/data",
         inference: str = "none",
         max_results: int | None = None,
+        allow_warnings: bool = False,
     ) -> Report:
         """Validates a data graph held in memory, in any supported format.
 
@@ -169,6 +172,7 @@ def validate(
     shapes_path: str | None = None,
     inference: str = "none",
     max_results: int | None = None,
+    allow_warnings: bool = False,
 ) -> Report:
     """Validates `data_path` against `shapes_path` in one call.
 

@@ -92,6 +92,11 @@ fn percent_decode(s: &str) -> String {
 struct Outcome {
     name: String,
     status: Status,
+    /// The same test compared the way the suite itself compares: the actual
+    /// report graph against the expected one, up to blank-node isomorphism.
+    /// `None` when there is no report to compare — a test expecting a failure,
+    /// a node-expression test, or one that could not run.
+    iso: Option<Result<(), String>>,
 }
 
 enum Status {
@@ -112,6 +117,7 @@ fn run_manifest(manifest: &Path, out: &mut Vec<Outcome>) {
             out.push(Outcome {
                 name: manifest.display().to_string(),
                 status: Status::Error(format!("could not load manifest: {e}")),
+                iso: None,
             });
             return;
         }
@@ -142,12 +148,15 @@ fn run_manifest(manifest: &Path, out: &mut Vec<Outcome>) {
             .iri(entry)
             .map(|i| short_name(i, manifest))
             .unwrap_or_else(|| format!("{}#?", manifest.display()));
-        let status = if is_validate {
+        let (status, iso) = if is_validate {
             run_one(entry, &graph, &mut store, &vocab, manifest)
         } else {
-            run_node_expr(entry, &graph, &mut store, &vocab, &shnex)
+            (
+                run_node_expr(entry, &graph, &mut store, &vocab, &shnex),
+                None,
+            )
         };
-        out.push(Outcome { name, status });
+        out.push(Outcome { name, status, iso });
     }
 }
 
@@ -269,12 +278,12 @@ fn run_one(
     store: &mut TermStore,
     vocab: &Vocab,
     manifest_path: &Path,
-) -> Status {
+) -> (Status, Option<Result<(), String>>) {
     let Some(action) = manifest.object(entry, vocab.mf_action) else {
-        return Status::Error("entry has no mf:action".into());
+        return (Status::Error("entry has no mf:action".into()), None);
     };
     let Some(result_node) = manifest.object(entry, vocab.mf_result) else {
-        return Status::Error("entry has no mf:result".into());
+        return (Status::Error("entry has no mf:result".into()), None);
     };
 
     // A test may point at the manifest itself (`<>`) or at a sibling document.
@@ -305,20 +314,34 @@ fn run_one(
     // Fast path: both graphs are the manifest document, which covers the great
     // majority of the suite and needs no extra loading.
     if same_as_manifest(&data_path) && same_as_manifest(&shapes_path) {
-        let actual = match shacl::validate::validate(manifest, manifest, store, vocab) {
-            Ok(r) if expects_failure => {
-                return Status::Mismatch(format!(
-                    "expected a failure, but validation produced {} result(s)",
-                    r.results.len()
-                ));
+        let (actual, compiled) = match validate_compiled(manifest, manifest, store, vocab) {
+            Ok((r, _)) if expects_failure => {
+                return (
+                    Status::Mismatch(format!(
+                        "expected a failure, but validation produced {} result(s)",
+                        r.results.len()
+                    )),
+                    None,
+                );
             }
-            Ok(r) => r,
+            Ok(pair) => pair,
             // A failure was the expected outcome.
-            Err(_) if expects_failure => return Status::Pass,
-            Err(e) => return Status::Error(format!("validation failed: {e}")),
+            Err(_) if expects_failure => return (Status::Pass, None),
+            Err(e) => return (Status::Error(format!("validation failed: {e}")), None),
         };
-        return compare(
+        let iso = compare_as_graphs(
+            result_node,
+            manifest,
+            &actual,
+            manifest,
+            &compiled,
+            store,
+            vocab,
+            &expected.disallowed,
+        );
+        let status = compare(
             &expected.report,
+            expected.conforms,
             &actual,
             manifest,
             manifest,
@@ -326,10 +349,14 @@ fn run_one(
             vocab,
             &expected.disallowed,
         );
+        return (status, Some(iso));
     }
 
     let (Some(data_path), Some(shapes_path)) = (data_path, shapes_path) else {
-        return Status::Error("mf:action is missing a data or shapes graph".into());
+        return (
+            Status::Error("mf:action is missing a data or shapes graph".into()),
+            None,
+        );
     };
 
     let load = |path: &PathBuf, scope: u32, store: &mut TermStore| {
@@ -342,38 +369,280 @@ fn run_one(
     };
     let data = match load(&data_path, 100, store) {
         Ok(g) => g,
-        Err(e) => return Status::Error(format!("data graph: {e}")),
+        Err(e) => return (Status::Error(format!("data graph: {e}")), None),
     };
     let shapes = if shapes_path == data_path {
         None
     } else {
         match load(&shapes_path, 101, store) {
             Ok(g) => Some(g),
-            Err(e) => return Status::Error(format!("shapes graph: {e}")),
+            Err(e) => return (Status::Error(format!("shapes graph: {e}")), None),
         }
     };
     let shapes_ref = shapes.as_ref().unwrap_or(&data);
 
-    let actual = match shacl::validate::validate(&data, shapes_ref, store, vocab) {
-        Ok(r) if expects_failure => {
-            return Status::Mismatch(format!(
-                "expected a failure, but validation produced {} result(s)",
-                r.results.len()
-            ));
+    let (actual, compiled) = match validate_compiled(&data, shapes_ref, store, vocab) {
+        Ok((r, _)) if expects_failure => {
+            return (
+                Status::Mismatch(format!(
+                    "expected a failure, but validation produced {} result(s)",
+                    r.results.len()
+                )),
+                None,
+            );
         }
-        Ok(r) => r,
-        Err(_) if expects_failure => return Status::Pass,
-        Err(e) => return Status::Error(format!("validation failed: {e}")),
+        Ok(pair) => pair,
+        Err(_) if expects_failure => return (Status::Pass, None),
+        Err(e) => return (Status::Error(format!("validation failed: {e}")), None),
     };
-    compare(
+    let iso = compare_as_graphs(
+        result_node,
+        manifest,
+        &actual,
+        shapes_ref,
+        &compiled,
+        store,
+        vocab,
+        &expected.disallowed,
+    );
+    let status = compare(
         &expected.report,
+        expected.conforms,
         &actual,
         manifest,
         shapes_ref,
         store,
         vocab,
         &expected.disallowed,
-    )
+    );
+    (status, Some(iso))
+}
+
+/// Compiles and validates, keeping the compiled shapes: the report writer
+/// renders `sh:resultPath` from them.
+fn validate_compiled(
+    data: &Graph,
+    shapes_graph: &Graph,
+    store: &mut TermStore,
+    vocab: &Vocab,
+) -> shacl::Result<(ValidationReport, shacl::shapes::Shapes)> {
+    let compiled = shacl::shapes::Shapes::compile(shapes_graph, store, vocab)?;
+    let report = shacl::validate::validate_in(data, &compiled, shapes_graph, store, vocab)?;
+    Ok((report, compiled))
+}
+
+/// Whether `predicate` carries report *structure* — the edges to follow when
+/// extracting an expected report from the manifest it is embedded in.
+///
+/// A report also references IRIs and data nodes: the focus node, the source
+/// shape, the value. Following those would drag the shape's whole definition,
+/// or the data graph, into the "expected report", which is not what the test
+/// asserts.
+fn is_report_structure(predicate: TermId, vocab: &Vocab) -> bool {
+    [
+        vocab.sh_result,
+        vocab.sh_resultPath,
+        vocab.sh_detail,
+        vocab.sh_inversePath,
+        vocab.sh_alternativePath,
+        vocab.sh_zeroOrMorePath,
+        vocab.sh_oneOrMorePath,
+        vocab.sh_zeroOrOnePath,
+        vocab.rdf_first,
+        vocab.rdf_rest,
+    ]
+    .contains(&predicate)
+}
+
+/// The expected report as a graph: everything reachable from the `mf:result`
+/// node through report structure.
+fn expected_report_graph(
+    result_node: TermId,
+    manifest: &Graph,
+    store: &TermStore,
+    vocab: &Vocab,
+) -> oxrdf::Graph {
+    let mut out = oxrdf::Graph::new();
+    let mut frontier = vec![result_node];
+    let mut seen = vec![result_node];
+    while let Some(node) = frontier.pop() {
+        // Only blank nodes expand; see `is_report_structure`.
+        if !store.is_blank(node) {
+            continue;
+        }
+        let subject = match store.to_oxrdf(node) {
+            oxrdf::Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b),
+            _ => continue,
+        };
+        for (p, o) in manifest.predicate_objects(node) {
+            if is_report_structure(p, vocab) && !seen.contains(&o) {
+                seen.push(o);
+                frontier.push(o);
+            }
+            out.insert(&oxrdf::Triple::new(
+                subject.clone(),
+                oxrdf::NamedNode::new_unchecked(store.iri(p).unwrap_or_default()),
+                store.to_oxrdf(o),
+            ));
+        }
+    }
+    out
+}
+
+/// Reduces an actual report to what the suite compares.
+///
+/// The SHACL test suite's own description (`testsuite/shacl10/index.html`)
+/// lists the predicates an expected report uses and says every other triple
+/// "needs to be removed from the actual graph prior to comparison". The one
+/// exception it states is `sh:resultMessage`: those are removed too, unless
+/// the expected graph contains a message with the same object, so that the
+/// tests written to check message handling still can. SHACL 1.2's suite
+/// carries no such text, but its expected reports use `sh:detail` and
+/// `sh:conformanceDisallows`, so those join the list.
+///
+/// Done as a walk from the report node rather than a filter over triples, so
+/// that dropping an edge — a message, a detail — drops what hung off it
+/// rather than leaving it in the graph as an unconnected fragment.
+fn normalise_for_suite(got: &oxrdf::Graph, expected: &oxrdf::Graph) -> oxrdf::Graph {
+    use oxrdf::{NamedNodeRef, TermRef};
+    const SH: &str = "http://www.w3.org/ns/shacl#";
+    const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+    let sh = |l: &str| oxrdf::NamedNode::new_unchecked(format!("{SH}{l}"));
+    let rdf = |l: &str| oxrdf::NamedNode::new_unchecked(format!("{RDF}{l}"));
+
+    let compared: Vec<oxrdf::NamedNode> = vec![
+        rdf("type"),
+        sh("result"),
+        sh("conforms"),
+        sh("conformanceDisallows"),
+        sh("focusNode"),
+        sh("resultPath"),
+        sh("resultSeverity"),
+        sh("sourceConstraint"),
+        sh("sourceConstraintComponent"),
+        sh("sourceShape"),
+        sh("value"),
+        sh("inversePath"),
+        sh("alternativePath"),
+        sh("zeroOrMorePath"),
+        sh("oneOrMorePath"),
+        sh("zeroOrOnePath"),
+        rdf("first"),
+        rdf("rest"),
+    ];
+    let message = sh("resultMessage");
+    let detail = sh("detail");
+    let expected_messages: Vec<oxrdf::Term> = expected
+        .triples_for_predicate(message.as_ref())
+        .map(|t| t.object.into_owned())
+        .collect();
+    let expected_has_detail = expected
+        .triples_for_predicate(detail.as_ref())
+        .next()
+        .is_some();
+
+    let keep = |p: NamedNodeRef<'_>, o: TermRef<'_>| -> bool {
+        if compared.iter().any(|c| c.as_ref() == p) {
+            return true;
+        }
+        if p == message.as_ref() {
+            return expected_messages.iter().any(|m| m.as_ref() == o);
+        }
+        if p == detail.as_ref() {
+            return expected_has_detail;
+        }
+        false
+    };
+
+    let mut out = oxrdf::Graph::new();
+    let report_type = sh("ValidationReport");
+    let mut frontier: Vec<oxrdf::NamedOrBlankNode> = got
+        .triples_for_object(TermRef::NamedNode(report_type.as_ref()))
+        .map(|t| t.subject.into_owned())
+        .collect();
+    let mut seen: Vec<oxrdf::NamedOrBlankNode> = frontier.clone();
+    while let Some(node) = frontier.pop() {
+        for t in got.triples_for_subject(node.as_ref()) {
+            if !keep(t.predicate, t.object) {
+                continue;
+            }
+            out.insert(&t.into_owned());
+            if let TermRef::BlankNode(b) = t.object {
+                let next = oxrdf::NamedOrBlankNode::BlankNode(b.into_owned());
+                if !seen.contains(&next) {
+                    seen.push(next.clone());
+                    frontier.push(next);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The comparison the suite itself defines: the report graphs, up to
+/// blank-node isomorphism, after [`normalise_for_suite`].
+///
+/// Stricter than [`compare`], which matches result by result. It catches
+/// what that cannot: a report whose *shape* is wrong — a compound path
+/// shared between results, say — while every result in it is individually
+/// right.
+#[allow(clippy::too_many_arguments)]
+fn compare_as_graphs(
+    result_node: TermId,
+    manifest: &Graph,
+    actual: &ValidationReport,
+    shapes_graph: &Graph,
+    compiled: &shacl::shapes::Shapes,
+    store: &TermStore,
+    vocab: &Vocab,
+    disallowed: &[TermId],
+) -> Result<(), String> {
+    use oxrdf::dataset::CanonicalizationAlgorithm;
+    let mut expected = expected_report_graph(result_node, manifest, store, vocab);
+    let raw = actual.to_oxrdf(store, vocab, shapes_graph, compiled, disallowed);
+    let mut got = normalise_for_suite(&raw, &expected);
+    expected.canonicalize(CanonicalizationAlgorithm::Unstable);
+    got.canonicalize(CanonicalizationAlgorithm::Unstable);
+    if expected == got {
+        return Ok(());
+    }
+    let mut missing: Vec<String> = expected
+        .iter()
+        .filter(|t| !got.contains(*t))
+        .map(|t| t.to_string())
+        .collect();
+    let mut extra: Vec<String> = got
+        .iter()
+        .filter(|t| !expected.contains(*t))
+        .map(|t| t.to_string())
+        .collect();
+    missing.sort();
+    extra.sort();
+    // The first of each by default; every line under SHACL_TEST_ISO_FULL,
+    // since the first line of a canonical diff is often a relabelled blank
+    // node and the real difference is further down.
+    let shown = if std::env::var_os("SHACL_TEST_ISO_FULL").is_some() {
+        usize::MAX
+    } else {
+        1
+    };
+    let list = |v: &[String]| -> String {
+        if v.is_empty() {
+            return "-".into();
+        }
+        v.iter()
+            .take(shown)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n               ")
+    };
+    Err(format!(
+        "not isomorphic: {} triple(s) expected but absent, {} present but unexpected\n      missing: {}\n      extra:   {}",
+        missing.len(),
+        extra.len(),
+        list(&missing),
+        list(&extra),
+    ))
 }
 
 // --------------------------------------------------------------- comparison
@@ -385,8 +654,10 @@ fn run_one(
 /// `sh:resultPath` blank nodes live in the manifest, while the actual report's
 /// live in the shapes graph. Each side must compile its paths against the graph
 /// that actually contains them.
+#[allow(clippy::too_many_arguments)]
 fn compare(
     expected: &ValidationReport,
+    expected_conforms: bool,
     actual: &ValidationReport,
     expected_graph: &Graph,
     actual_graph: &Graph,
@@ -394,11 +665,14 @@ fn compare(
     vocab: &Vocab,
     disallowed: &[TermId],
 ) -> Status {
-    if expected.conforms(disallowed) != actual.conforms(disallowed) {
+    // The `sh:conforms` the test *wrote*, not one recomputed from its results
+    // under this engine's own rule. Recomputing it is how the engine's default
+    // — only `sh:Violation` blocking — went unnoticed against a suite whose
+    // reports say a lone `sh:Warning` does not conform.
+    if expected_conforms != actual.conforms(disallowed, vocab) {
         return Status::Mismatch(format!(
-            "conforms: expected {}, got {}",
-            expected.conforms(disallowed),
-            actual.conforms(disallowed)
+            "conforms: expected {expected_conforms}, got {}",
+            actual.conforms(disallowed, vocab)
         ));
     }
 
@@ -494,6 +768,8 @@ fn w3c_test_suites() {
 
     let mut total = 0usize;
     let mut total_pass = 0usize;
+    let mut total_iso = 0usize;
+    let mut total_iso_pass = 0usize;
     println!();
     for (suite, outcomes) in &per_suite {
         let pass = outcomes
@@ -504,14 +780,25 @@ fn w3c_test_suites() {
             .iter()
             .filter(|o| matches!(o.status, Status::Error(_)))
             .count();
+        // The suite's own comparison, over the tests that produce a report.
+        let iso_total = outcomes.iter().filter(|o| o.iso.is_some()).count();
+        let iso_pass = outcomes
+            .iter()
+            .filter(|o| matches!(o.iso, Some(Ok(()))))
+            .count();
         total += outcomes.len();
         total_pass += pass;
+        total_iso += iso_total;
+        total_iso_pass += iso_pass;
         println!(
-            "  {suite:<10} {pass:>3}/{:<3} passing  ({errors} could not run)",
+            "  {suite:<10} {pass:>3}/{:<3} passing  ({errors} could not run)   as graphs: {iso_pass:>3}/{iso_total:<3}",
             outcomes.len()
         );
     }
-    println!("  {:<10} {total_pass:>3}/{total:<3} passing", "TOTAL");
+    println!(
+        "  {:<10} {total_pass:>3}/{total:<3} passing                        as graphs: {total_iso_pass:>3}/{total_iso:<3}",
+        "TOTAL"
+    );
 
     if verbose {
         println!("\n  failures:");
@@ -521,6 +808,9 @@ fn w3c_test_suites() {
                     Status::Pass => {}
                     Status::Mismatch(m) => println!("    [diff] {}\n      {m}", o.name),
                     Status::Error(e) => println!("    [err ] {}: {e}", o.name),
+                }
+                if let (Status::Pass, Some(Err(m))) = (&o.status, &o.iso) {
+                    println!("    [iso ] {}\n      {m}", o.name);
                 }
             }
         }
@@ -656,6 +946,22 @@ fn progress() {
     failing.sort_unstable();
     let mut known: Vec<&str> = KNOWN_FAILURES.to_vec();
     known.sort_unstable();
+
+    // The suite's own comparison must agree with the per-result one on every
+    // test that passes. A report right result by result but wrong as a graph
+    // — a path shared between results, a message the shape did not declare,
+    // a `sh:conforms` computed by the engine's rule rather than the
+    // specification's — is exactly the class of defect this harness used to
+    // let through, and it is not allowed back.
+    let right_but_misshapen: Vec<&str> = outcomes
+        .iter()
+        .filter(|o| matches!(o.status, Status::Pass) && matches!(o.iso, Some(Err(_))))
+        .map(|o| o.name.as_str())
+        .collect();
+    assert!(
+        right_but_misshapen.is_empty(),
+        "these pass result by result but their report is not isomorphic to the          expected one — run with SHACL_TEST_VERBOSE=1 SHACL_TEST_ISO_FULL=1 to see          the difference: {right_but_misshapen:#?}"
+    );
 
     let unexpected: Vec<_> = failing.iter().filter(|n| !known.contains(n)).collect();
     let fixed: Vec<_> = known.iter().filter(|n| !failing.contains(n)).collect();

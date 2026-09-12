@@ -254,18 +254,19 @@ multi-character shorts of its own — so `--df` works too. Two differences worth
 knowing:
 
 - `-f` has no `table`; `human` is the readable format.
-- Warnings and infos never break conformance by default, so `-w` is accepted
-  but already the default. `--min-severity warning` is the knob in the other
-  direction, for making them count.
+- `-w`/`--allow-warnings` means what it means in pySHACL: warnings and infos
+  stop breaking conformance. Without it, as in pySHACL and as the SHACL
+  specification says, a `sh:Warning` or `sh:Info` result makes `sh:conforms`
+  false. See [What conforms means](#what-conforms-means).
 
 ## Conformance
 
 The suites are run by a manifest-driven harness covering both kinds of entry:
 `sht:Validate`, which validates a data graph and compares reports, and
 `sht:EvalNodeExpr`, which evaluates a node expression and compares the resulting
-sequence. Expected and actual reports are compared through one in-memory
-representation rather than by diffing serialised RDF; `sh:resultMessage` is
-excluded, since the spec leaves message text to the implementation.
+sequence. Expected and actual reports are compared two ways — result by
+result through one in-memory representation, and as RDF graphs the way the
+suite itself specifies (below) — and both have to agree.
 
 **418 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
 SPARQL-based constraints with pre-binding, user-declared constraint components,
@@ -273,6 +274,72 @@ the node expression algebra, SPARQL-selected targets and RDF 1.2 annotations are
 all implemented. The eight that remain are named, with the reason for each, in
 `KNOWN_FAILURES` in `tests/w3c.rs` — the suite asserts that list matches what
 actually fails, so it cannot drift.
+
+### Compared the way the suite compares
+
+The suite defines its own comparison, and it is not result by result. Its
+description (`testsuite/shacl10/index.html`) says the actual report must be
+**isomorphic** to the expected one as an RDF graph, after removing every
+triple whose predicate the expected reports do not use, and removing
+`sh:resultMessage` except where the expected report carries a message with
+the same object. It also says, in so many words, that path structures under
+`sh:resultPath` must not be shared between results and must not reuse a
+blank node in two places.
+
+The harness now runs that comparison alongside its own, reports both, and
+asserts they agree on every passing test:
+
+```
+  shacl10    118/120 passing  (0 could not run)   as graphs: 113/113
+  shacl12    300/306 passing  (0 could not run)   as graphs: 153/158
+  TOTAL      418/426 passing                        as graphs: 266/271
+```
+
+The second column counts the tests that produce a report at all — the rest
+expect a failure, or evaluate a node expression — and the five it does not
+reach are five of the eight known failures.
+
+Adding it found six deviations the per-result comparison had let through for
+every release so far, each a report that was right result by result and wrong
+as a document. Compound paths were shared between results and a repeated
+sub-expression was written once. `sh:conforms` followed the engine's rule
+rather than the specification's — and the harness recomputed the expected
+report's conformance under the same rule instead of reading the value the
+test wrote, so it agreed with itself. `sh:sourceConstraint` carried a pattern
+literal, and appeared on results from constraint components, where the
+specification gives it to `sh:sparql` constraints alone; and it was missing
+from `sh:nodeByExpression` results. `{?var}` in a SPARQL constraint's message
+was not substituted. And a message annotated onto a constraint triple —
+`sh:datatype xsd:integer {| sh:message "…" |}` in Turtle 1.2 — was not read.
+All six are fixed, and a report that is right but misshapen is now a test
+failure.
+
+### What conforms means
+
+`sh:conforms` is false when the report holds a result whose severity breaks
+conformance. Which severities do is `sh:conformanceDisallows`, and when a
+report declares none — the ordinary case — the specification's default
+applies: **`sh:Violation`, `sh:Warning` and `sh:Info`**. In SHACL 1.0 those
+were the only severities, so the rule read as "conforms means no results";
+SHACL 1.2 added `sh:Debug` and `sh:Trace` beneath them, which report without
+blocking. The suite pins each edge: one `sh:Warning` result is `conforms
+false` (`severity-001`), one `sh:Debug` result is `conforms true`
+(`severity-004`).
+
+Until 0.3.0 this engine's default was `sh:Violation` alone — pySHACL's
+`--allow-warnings` reading, taken as if it were pySHACL's default, which it is
+not. A report with one warning said `conforms true`, which is the wrong side
+of the only answer a validator gives.
+
+`--min-severity` sets the threshold: `info` is the default and the
+specification's; `warning` and `violation` narrow it; `debug` and `trace`
+widen it to the 1.2 severities. Anything but the default is written into the
+report as `sh:conformanceDisallows`, so a reader can tell `conforms true`
+over a warning from `conforms true` over nothing. `-w`/`--allow-warnings` is
+`--min-severity violation` spelled as pySHACL spells it. In Python the same
+knob is `allow_warnings=` on `validate`, `validate_file`, `validate_text` and
+`validate_turtle`; the WebAssembly `Report.conforms` uses the default, and
+`results` carries every severity for a caller who wants another reading.
 
 ### Recursion
 

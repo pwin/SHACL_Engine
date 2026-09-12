@@ -121,12 +121,16 @@ struct Args {
     #[arg(short = 'm', long, visible_alias = "metashacl")]
     meta_shacl: bool,
 
-    /// Let `sh:Warning` results stand without breaking conformance. This is
-    /// already the default; accepted for pySHACL compatibility.
+    /// Let `sh:Warning` and `sh:Info` results stand without breaking
+    /// conformance, as pySHACL's flag of the same name does.
+    ///
+    /// Off by default, because the specification is: `sh:conforms` is false
+    /// whenever the report holds a result, whatever its severity. The report
+    /// records the choice as `sh:conformanceDisallows`.
     #[arg(short = 'w', long, visible_alias = "allow-warning")]
     allow_warnings: bool,
 
-    /// Let `sh:Info` results stand. Also already the default.
+    /// Let `sh:Info` results stand, as pySHACL's flag does.
     #[arg(long, visible_alias = "allow-info")]
     allow_infos: bool,
 
@@ -138,10 +142,11 @@ struct Args {
     /// The least severity that breaks conformance. Results below it are still
     /// reported, but leave the graph conforming and the exit status 0.
     ///
-    /// Only `sh:Violation` does so by default, which is already what pySHACL's
-    /// `--allow-warnings` gives you; this is the knob in the other direction,
-    /// for treating warnings — or everything — as failures.
-    #[arg(long, value_enum, default_value_t = Severity::Violation)]
+    /// `info` is the default and the specification's: `sh:Info`,
+    /// `sh:Warning` and `sh:Violation` break conformance, while SHACL 1.2's
+    /// `sh:Debug` and `sh:Trace` report without blocking. Anything else is
+    /// recorded in the report as `sh:conformanceDisallows`.
+    #[arg(long, value_enum, default_value_t = Severity::Info)]
     min_severity: Severity,
 
     /// Print only whether the data conforms, not the individual results.
@@ -173,7 +178,13 @@ enum Inference {
 /// Violation.
 #[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 enum Severity {
-    /// Any result at all breaks conformance.
+    /// Every result breaks conformance, `sh:Trace` included.
+    Trace,
+    /// Everything from `sh:Debug` up breaks conformance.
+    Debug,
+    /// The specification's default: `sh:Info`, `sh:Warning` and
+    /// `sh:Violation` break conformance; `sh:Debug` and `sh:Trace` report
+    /// without blocking.
     Info,
     /// Warnings and violations break conformance.
     Warning,
@@ -182,13 +193,26 @@ enum Severity {
 }
 
 impl Severity {
-    /// The severities at or above this threshold, which is what
-    /// `ValidationReport::conforms` wants.
+    /// The severities at or above this threshold, as `sh:conformanceDisallows`
+    /// would list them — which is what `ValidationReport::conforms` takes.
+    ///
+    /// `Info` is the empty list rather than the three it stands for. Empty is
+    /// the specification's default, and it keeps `sh:conformanceDisallows`
+    /// out of the report, where listing the default would say the same thing
+    /// at greater length.
     fn disallowed(self, v: &Vocab) -> Vec<shacl::TermId> {
         match self {
             Self::Violation => vec![v.sh_Violation],
             Self::Warning => vec![v.sh_Violation, v.sh_Warning],
-            Self::Info => vec![v.sh_Violation, v.sh_Warning, v.sh_Info],
+            Self::Info => vec![],
+            Self::Debug => vec![v.sh_Violation, v.sh_Warning, v.sh_Info, v.sh_Debug],
+            Self::Trace => vec![
+                v.sh_Violation,
+                v.sh_Warning,
+                v.sh_Info,
+                v.sh_Debug,
+                v.sh_Trace,
+            ],
         }
     }
 }
@@ -846,7 +870,7 @@ fn run() -> Result<bool> {
     if args.meta_shacl {
         let meta = check_shapes_graph(shapes_ref, &mut store, &vocab)
             .context("validating the shapes graph against SHACL-SHACL")?;
-        if !meta.conforms(&[vocab.sh_Violation]) {
+        if !meta.conforms(&[vocab.sh_Violation], &vocab) {
             for r in &meta.results {
                 eprintln!(
                     "  shapes graph: {} on {}",
@@ -912,6 +936,9 @@ fn run() -> Result<bool> {
         severity = Severity::Violation;
     }
     let disallowed = severity.disallowed(&vocab);
+    // An empty list is the specification's default and means every result
+    // counts, which `blocking: None` spells.
+    let blocking = (!disallowed.is_empty()).then(|| disallowed.clone());
 
     // `--abort` is the common spelling of a cap of one; if both are given the
     // smaller wins, since each is a ceiling rather than a target.
@@ -925,7 +952,7 @@ fn run() -> Result<bool> {
     // run print `conforms: true` with a violation still unexamined.
     let options = shacl::validate::Options {
         max_results,
-        blocking: Some(disallowed.clone()),
+        blocking,
         threads: args.threads,
     };
 
@@ -952,7 +979,7 @@ fn run() -> Result<bool> {
         best = best.min(t.elapsed());
     }
 
-    let conforms = report.conforms(&disallowed);
+    let conforms = report.conforms(&disallowed, &vocab);
 
     if args.timing {
         eprintln!(

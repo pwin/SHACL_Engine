@@ -129,7 +129,7 @@ fn main() {
                         }
                     }
                 }
-                Constraint::Pattern { regex, .. } => {
+                Constraint::Pattern(regex) => {
                     for row in sets.rows() {
                         for &v in row.values {
                             if regex.is_match(store.lexical_form(v).unwrap_or_default()) {

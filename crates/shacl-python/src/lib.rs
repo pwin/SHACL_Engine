@@ -323,7 +323,8 @@ impl Shapes {
     /// because it changes what the report says — a `sh:closed` shape starts
     /// seeing inferred predicates — so it should be asked for rather than
     /// assumed.
-    #[pyo3(signature = (text, format = "turtle", base = "http://example.org/data", inference = "none", max_results = None))]
+    #[pyo3(signature = (text, format = "turtle", base = "http://example.org/data", inference = "none", max_results = None, allow_warnings = false))]
+    #[allow(clippy::too_many_arguments)]
     fn validate_text(
         &self,
         py: Python<'_>,
@@ -332,6 +333,7 @@ impl Shapes {
         base: &str,
         inference: &str,
         max_results: Option<usize>,
+        allow_warnings: bool,
     ) -> PyResult<Report> {
         let fmt = format_by_name(format)?;
         let inf = Inference::parse(inference)?;
@@ -342,7 +344,7 @@ impl Shapes {
                 .map_err(to_py_err)?;
             {
                 let data = inf.apply(b.build(), self, &mut store, &self.vocab)?;
-                self.run(&mut store, &data, max_results)
+                self.run(&mut store, &data, max_results, allow_warnings)
             }
         })
     }
@@ -351,13 +353,14 @@ impl Shapes {
     ///
     /// `inference` materialises entailed triples into the data graph first:
     /// `"none"` (the default) or `"rdfs"`. See `Shapes.validate_text`.
-    #[pyo3(signature = (path, inference = "none", max_results = None))]
+    #[pyo3(signature = (path, inference = "none", max_results = None, allow_warnings = false))]
     fn validate_file(
         &self,
         py: Python<'_>,
         path: PathBuf,
         inference: &str,
         max_results: Option<usize>,
+        allow_warnings: bool,
     ) -> PyResult<Report> {
         let inf = Inference::parse(inference)?;
         py.detach(|| {
@@ -365,13 +368,13 @@ impl Shapes {
             let data = loader::load_file(&path, scope::DATA, &mut store).map_err(to_py_err)?;
             {
                 let data = inf.apply(data, self, &mut store, &self.vocab)?;
-                self.run(&mut store, &data, max_results)
+                self.run(&mut store, &data, max_results, allow_warnings)
             }
         })
     }
 
     /// Validates a data graph held in memory as Turtle.
-    #[pyo3(signature = (text, base = "http://example.org/data", inference = "none", max_results = None))]
+    #[pyo3(signature = (text, base = "http://example.org/data", inference = "none", max_results = None, allow_warnings = false))]
     fn validate_turtle(
         &self,
         py: Python<'_>,
@@ -379,6 +382,7 @@ impl Shapes {
         base: &str,
         inference: &str,
         max_results: Option<usize>,
+        allow_warnings: bool,
     ) -> PyResult<Report> {
         let inf = Inference::parse(inference)?;
         py.detach(|| {
@@ -395,7 +399,7 @@ impl Shapes {
             .map_err(to_py_err)?;
             {
                 let data = inf.apply(b.build(), self, &mut store, &self.vocab)?;
-                self.run(&mut store, &data, max_results)
+                self.run(&mut store, &data, max_results, allow_warnings)
             }
         })
     }
@@ -421,8 +425,18 @@ impl Shapes {
         store: &mut TermStore,
         data: &Graph,
         max_results: Option<usize>,
+        allow_warnings: bool,
     ) -> PyResult<Report> {
         let vocab = &self.vocab;
+        // The specification's default is that every result breaks
+        // conformance; `allow_warnings` is pySHACL's knob, and its name, for
+        // letting `sh:Warning` and `sh:Info` results stand. The report records
+        // the choice as `sh:conformanceDisallows`.
+        let disallowed: Vec<engine::TermId> = if allow_warnings {
+            vec![vocab.sh_Violation]
+        } else {
+            vec![]
+        };
         // `max_results` is a real early exit in the engine, not a truncation
         // of a finished report, so it also caps the memory a run costs. That
         // is the point of exposing it here: a systematically failing shape
@@ -436,7 +450,7 @@ impl Shapes {
         // along.
         let options = engine::validate::Options {
             max_results,
-            blocking: Some(vec![vocab.sh_Violation]),
+            blocking: (!disallowed.is_empty()).then(|| disallowed.clone()),
             threads: 0,
         };
         let report = engine::validate::validate_in_with(
@@ -526,14 +540,14 @@ impl Shapes {
             .collect();
 
         Ok(Report {
-            conforms: report.conforms(&[vocab.sh_Violation]),
+            conforms: report.conforms(&disallowed, vocab),
             results,
             graph: report.to_oxrdf(
                 store,
                 vocab,
                 &self.shapes_graph,
                 &self.compiled,
-                &[vocab.sh_Violation],
+                &disallowed,
             ),
         })
     }
@@ -574,13 +588,14 @@ fn format_by_name(name: &str) -> PyResult<engine::report::RdfFormat> {
 /// directly when the same shapes are reused, which is the case worth
 /// optimising for.
 #[pyfunction]
-#[pyo3(signature = (data_path, shapes_path = None, inference = "none", max_results = None))]
+#[pyo3(signature = (data_path, shapes_path = None, inference = "none", max_results = None, allow_warnings = false))]
 fn validate(
     py: Python<'_>,
     data_path: PathBuf,
     shapes_path: Option<PathBuf>,
     inference: &str,
     max_results: Option<usize>,
+    allow_warnings: bool,
 ) -> PyResult<Report> {
     // A self-describing document carries its own shapes, which is the
     // convention the CLI follows too.
@@ -599,7 +614,7 @@ fn validate(
              len() yourself.",
         ));
     }
-    shapes.validate_file(py, data_path, inference, max_results)
+    shapes.validate_file(py, data_path, inference, max_results, allow_warnings)
 }
 
 /// `gil_used = false` declares the module safe for free-threaded CPython.

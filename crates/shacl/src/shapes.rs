@@ -87,11 +87,7 @@ pub enum Constraint {
     // String based
     MinLength(u32),
     MaxLength(u32),
-    Pattern {
-        regex: Regex,
-        /// The original `sh:pattern` literal, reported as `sh:sourceConstraint`.
-        source: TermId,
-    },
+    Pattern(Regex),
     LanguageIn(Vec<TermId>),
     UniqueLang,
 
@@ -191,7 +187,7 @@ impl Constraint {
             Self::MaxInclusive(_) => v.sh_MaxInclusiveConstraintComponent,
             Self::MinLength(_) => v.sh_MinLengthConstraintComponent,
             Self::MaxLength(_) => v.sh_MaxLengthConstraintComponent,
-            Self::Pattern { .. } => v.sh_PatternConstraintComponent,
+            Self::Pattern(_) => v.sh_PatternConstraintComponent,
             Self::LanguageIn(_) => v.sh_LanguageInConstraintComponent,
             Self::UniqueLang => v.sh_UniqueLangConstraintComponent,
             Self::Equals(_) => v.sh_EqualsConstraintComponent,
@@ -255,6 +251,17 @@ pub struct Shape {
     pub constraints: Vec<Constraint>,
     pub severity: TermId,
     pub messages: Vec<TermId>,
+    /// Messages annotated onto a single constraint rather than the shape:
+    /// `sh:datatype xsd:integer {| sh:message "…" |}` in Turtle 1.2, which
+    /// reifies the constraint triple and attaches the message to the reifier.
+    /// Keyed by the constraint component the parameter belongs to; a result
+    /// from that component carries these instead of `messages`.
+    ///
+    /// By component rather than by constraint because that is what a result
+    /// knows about itself. Two constraints of one component on one shape —
+    /// `sh:class ex:A` and `sh:class ex:B`, each annotated differently — merge
+    /// their messages here, which is the approximation this buys.
+    pub component_messages: HashMap<TermId, Vec<TermId>>,
     pub deactivated: bool,
     /// SHACL-AF rules attached with `sh:rule`. Empty for almost every shape,
     /// and never consulted unless rules are asked for.
@@ -315,6 +322,7 @@ impl Shape {
             constraints: Vec::new(),
             severity,
             messages: Vec::new(),
+            component_messages: HashMap::new(),
             deactivated: false,
             rules: Vec::new(),
             order: 0.0,
@@ -699,10 +707,61 @@ impl<'a> Compiler<'a> {
             constraints,
             severity,
             messages: g.objects(node, v.sh_message).collect(),
+            component_messages: self.annotated_messages(node),
             deactivated,
             rules,
             order: self.number(node, v.sh_order).unwrap_or(0.0),
         })
+    }
+
+    /// Messages attached to a shape's constraint triples through RDF 1.2
+    /// reification, by the component each triple's parameter belongs to.
+    ///
+    /// `ex:S sh:datatype xsd:integer {| sh:message "m" |}` parses to a reifier
+    /// `_:r rdf:reifies << ex:S sh:datatype xsd:integer >> ; sh:message "m"`.
+    /// So for every triple about the shape, look up its triple term, then any
+    /// reifier of it, then that reifier's messages.
+    ///
+    /// A parameter's component is derived from its name — `sh:datatype` is
+    /// `sh:DatatypeConstraintComponent` — and checked against the vocabulary,
+    /// which drops `sh:flags`, `sh:ignoredProperties` and the other parameters
+    /// that belong to a component named after a different one. A message on
+    /// one of those has nowhere to go and is left where it is.
+    fn annotated_messages(&self, node: TermId) -> HashMap<TermId, Vec<TermId>> {
+        let v = self.vocab;
+        let g = self.graph;
+        let mut out: HashMap<TermId, Vec<TermId>> = HashMap::new();
+        for (p, o) in g.predicate_objects(node) {
+            let Some(triple) = self.store.get_triple_term(node, p, o) else {
+                continue;
+            };
+            let messages: Vec<TermId> = g
+                .subjects(v.rdf_reifies, triple)
+                .flat_map(|r| g.objects(r, v.sh_message))
+                .collect();
+            if messages.is_empty() {
+                continue;
+            }
+            let Some(local) = self
+                .store
+                .iri(p)
+                .and_then(|iri| iri.strip_prefix(crate::model::vocab::SH))
+            else {
+                continue;
+            };
+            let mut component = String::with_capacity(local.len() + 24);
+            let mut chars = local.chars();
+            if let Some(first) = chars.next() {
+                component.extend(first.to_uppercase());
+            }
+            component.push_str(chars.as_str());
+            component.push_str("ConstraintComponent");
+            let iri = format!("{}{component}", crate::model::vocab::SH);
+            if let Some(id) = self.store.get_named_node(&iri) {
+                out.entry(id).or_default().extend(messages);
+            }
+        }
+        out
     }
 
     /// Reads a numeric literal, for `sh:order`.
@@ -876,10 +935,7 @@ impl<'a> Compiler<'a> {
                 .store
                 .lexical_form(t)
                 .ok_or_else(|| Error::Shape("sh:pattern is not a string".into()))?;
-            out.push(Constraint::Pattern {
-                regex: build_regex(pattern, flags)?,
-                source: t,
-            });
+            out.push(Constraint::Pattern(build_regex(pattern, flags)?));
         }
         for t in self.objects_active(node, v.sh_languageIn) {
             let langs = g
@@ -1486,7 +1542,7 @@ mod tests {
         let (mut store, _, s) =
             compile("ex:S a sh:NodeShape ; sh:pattern \"^a\" ; sh:flags \"i\" .");
         let shape = shape_of(&s, &mut store, "http://ex/S");
-        let Constraint::Pattern { regex, .. } = &shape.constraints[0] else {
+        let Constraint::Pattern(regex) = &shape.constraints[0] else {
             panic!("expected sh:pattern");
         };
         assert!(regex.is_match("Abc"));
@@ -1498,7 +1554,7 @@ mod tests {
         // XPath fn:matches, which sh:pattern follows, is a search.
         let (mut store, _, s) = compile("ex:S a sh:NodeShape ; sh:pattern \"b\" .");
         let shape = shape_of(&s, &mut store, "http://ex/S");
-        let Constraint::Pattern { regex, .. } = &shape.constraints[0] else {
+        let Constraint::Pattern(regex) = &shape.constraints[0] else {
             panic!()
         };
         assert!(regex.is_match("abc"));

@@ -80,11 +80,14 @@ fn a_cap_does_not_stop_on_a_result_that_does_not_block() {
     let violation = vec![f.vocab.sh_Violation];
 
     let full = f.run(Options::default());
-    assert!(!full.conforms(&violation), "the graph does not conform");
+    assert!(
+        !full.conforms(&violation, &f.vocab),
+        "the graph does not conform"
+    );
 
     let capped = f.run(Options::first_blocking(violation.clone()));
     assert!(
-        !capped.conforms(&violation),
+        !capped.conforms(&violation, &f.vocab),
         "stopping early must not turn a non-conforming graph into a conforming one"
     );
 }
@@ -110,10 +113,10 @@ fn conformance_is_the_same_capped_or_not() {
     ] {
         let mut f = fixture(data, shapes);
         let blocking = vec![f.vocab.sh_Violation];
-        let full = f.run(Options::default()).conforms(&blocking);
+        let full = f.run(Options::default()).conforms(&blocking, &f.vocab);
         let capped = f
             .run(Options::first_blocking(blocking.clone()))
-            .conforms(&blocking);
+            .conforms(&blocking, &f.vocab);
         assert_eq!(full, capped, "data: {data}");
     }
 }
@@ -125,7 +128,7 @@ fn the_cap_follows_the_severities_it_is_given() {
     let strict = vec![f.vocab.sh_Violation, f.vocab.sh_Warning];
 
     let capped = f.run(Options::first_blocking(strict.clone()));
-    assert!(!capped.conforms(&strict));
+    assert!(!capped.conforms(&strict, &f.vocab));
     // The warning alone settles it now, so one result is enough.
     assert_eq!(capped.results.len(), 1);
 }
@@ -182,5 +185,5 @@ fn trimming_keeps_the_result_that_settles_conformance() {
             .any(|r| blocking.contains(&r.severity)),
         "the blocking result survived the trim"
     );
-    assert!(!report.conforms(&blocking));
+    assert!(!report.conforms(&blocking, &f.vocab));
 }

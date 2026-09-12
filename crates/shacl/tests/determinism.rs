@@ -87,6 +87,7 @@ fn the_report_is_exactly_these_bytes() {
     // scoping scheme shows up as a failure rather than as a surprise later.
     let expected = "\
 _:r0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/shacl#ValidationReport> .
+_:r0 <http://www.w3.org/ns/shacl#conformanceDisallows> <http://www.w3.org/ns/shacl#Violation> .
 _:r0 <http://www.w3.org/ns/shacl#conforms> \"false\"^^<http://www.w3.org/2001/XMLSchema#boolean> .
 _:r0 <http://www.w3.org/ns/shacl#result> _:r1 .
 _:r0 <http://www.w3.org/ns/shacl#result> _:r2 .

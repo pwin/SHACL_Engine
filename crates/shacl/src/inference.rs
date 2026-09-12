@@ -372,7 +372,7 @@ mod tests {
             crate::validate::validate_in(&data, &compiled, &shapes_graph, &mut store, &vocab)
                 .unwrap();
         assert!(
-            plain.conforms(&[vocab.sh_Violation]),
+            plain.conforms(&[vocab.sh_Violation], &vocab),
             "ex:a holds only ex:father, which the shape permits"
         );
 
@@ -382,7 +382,7 @@ mod tests {
             crate::validate::validate_in(&inferred, &compiled, &shapes_graph, &mut store, &vocab)
                 .unwrap();
         assert!(
-            !after.conforms(&[vocab.sh_Violation]),
+            !after.conforms(&[vocab.sh_Violation], &vocab),
             "the inferred predicate is not among those the shape allows"
         );
         assert!(

@@ -76,12 +76,29 @@ pub struct ValidationReport {
 }
 
 impl ValidationReport {
-    /// True when no result has a severity that blocks conformance.
+    /// True when no result blocks conformance.
     ///
-    /// `disallowed` lists the severities that break conformance — by default
-    /// just `sh:Violation`, but SHACL 1.2's `sh:conformanceDisallows` lets a
-    /// caller widen it.
-    pub fn conforms(&self, disallowed: &[TermId]) -> bool {
+    /// `disallowed` is SHACL 1.2's `sh:conformanceDisallows`: the severities
+    /// that break conformance. **Empty means the specification's default:
+    /// `sh:Violation`, `sh:Warning` and `sh:Info`.** In SHACL 1.0 those were
+    /// the only severities, so `sh:conforms` was simply "no results"; 1.2
+    /// adds `sh:Debug` and `sh:Trace` beneath them, which report without
+    /// blocking. The test suite pins each edge: `severity-001` puts one
+    /// `sh:Warning` result at `conforms false`, `severity-004` one `sh:Debug`
+    /// result at `conforms true`.
+    ///
+    /// `[sh:Violation]` is what pySHACL's `--allow-warnings` selects. It was
+    /// this engine's default until 0.3.0, which put a warning-only report on
+    /// the wrong side of the one answer a validator gives. The harness did
+    /// not notice because it computed the expected report's conformance with
+    /// the same default rather than reading the `sh:conforms` the test wrote.
+    pub fn conforms(&self, disallowed: &[TermId], vocab: &Vocab) -> bool {
+        let default = vocab.default_disallows();
+        let disallowed = if disallowed.is_empty() {
+            &default[..]
+        } else {
+            disallowed
+        };
         !self
             .results
             .iter()
@@ -125,8 +142,19 @@ impl ValidationReport {
         g.insert(&Triple::new(
             report.clone(),
             iri(vocab.sh_conforms),
-            Literal::from(self.conforms(disallowed)),
+            Literal::from(self.conforms(disallowed, vocab)),
         ));
+        // A report that judged conformance by a chosen set of severities says
+        // so, as SHACL 1.2 asks, so a reader can tell `conforms true` over a
+        // warning from `conforms true` over nothing. Absent when the default
+        // applied, which is what absent means.
+        for &severity in disallowed {
+            g.insert(&Triple::new(
+                report.clone(),
+                iri(vocab.sh_conformanceDisallows),
+                iri(severity),
+            ));
+        }
 
         for result in &self.results {
             self.write_result(
@@ -335,7 +363,8 @@ pub fn serialize_graph(graph: &OxGraph, format: oxrdfio::RdfFormat) -> crate::Re
 pub struct ParsedReport {
     pub report: ValidationReport,
     pub conforms: bool,
-    /// `sh:conformanceDisallows` values, defaulting to `[sh:Violation]`.
+    /// `sh:conformanceDisallows` values. Empty when the report declares
+    /// none, which is the specification's default: every result blocks.
     pub disallowed: Vec<TermId>,
 }
 
@@ -350,10 +379,7 @@ impl ValidationReport {
             .and_then(|t| store.lexical_form(t).map(|s| s == "true"))
             .unwrap_or(true);
 
-        let mut disallowed: Vec<TermId> = g.objects(node, vocab.sh_conformanceDisallows).collect();
-        if disallowed.is_empty() {
-            disallowed.push(vocab.sh_Violation);
-        }
+        let disallowed: Vec<TermId> = g.objects(node, vocab.sh_conformanceDisallows).collect();
 
         let results = g
             .objects(node, vocab.sh_result)
@@ -578,10 +604,14 @@ mod tests {
         };
 
         assert!(
-            report.conforms(&[vocab.sh_Violation]),
-            "a warning alone does not break conformance"
+            report.conforms(&[vocab.sh_Violation], &vocab),
+            "a warning alone does not break conformance when only violations are disallowed"
         );
-        assert!(!report.conforms(&[vocab.sh_Violation, vocab.sh_Warning]));
+        assert!(!report.conforms(&[vocab.sh_Violation, vocab.sh_Warning], &vocab));
+        assert!(
+            !report.conforms(&[], &vocab),
+            "under the specification's default a warning does break conformance"
+        );
     }
 
     #[test]

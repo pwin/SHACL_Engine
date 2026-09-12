@@ -112,11 +112,17 @@ pub fn validate_in_with(
     // since the constraint in flight when the limit is reached finishes its
     // own row. Trimming here makes the report say what was asked for.
     if let Some(n) = options.max_results {
+        let default = vocab.default_disallows();
         match &options.blocking {
             // Cut just after the nth blocking result. A blind `truncate(n)`
             // could drop the only result that breaks conformance and leave
             // the report contradicting itself.
             Some(severities) => {
+                let severities: &[TermId] = if severities.is_empty() {
+                    &default
+                } else {
+                    severities
+                };
                 let mut seen = 0;
                 let mut cut = results.len();
                 for (i, r) in results.iter().enumerate() {
@@ -265,7 +271,9 @@ struct Engine<'a> {
     /// Stop once this many blocking results are in hand. `None` reports
     /// everything.
     max_results: Option<usize>,
-    /// Severities that count towards `max_results`; `None` counts them all.
+    /// Severities that count towards `max_results`. `None` counts every
+    /// result; an empty list means the specification's default set, as it
+    /// does for [`ValidationReport::conforms`].
     blocking: Option<Vec<TermId>>,
 }
 
@@ -405,6 +413,83 @@ fn unwind(stack: &mut Stack, mark: usize) {
     stack.pairs.truncate(mark);
 }
 
+/// Substitutes `{?name}` and `{$name}` in a SPARQL constraint's message with
+/// the values bound to those variables, as the specification asks: the
+/// message of a SPARQL-based constraint or component is a template over the
+/// solution that produced the result, and the suite's
+/// `propertyValidator-select-001` expects `{?lang}` to read `de`.
+///
+/// A placeholder whose variable is unbound is left as written. The result is
+/// a fresh literal carrying the template's language tag, or its datatype, so
+/// a message written in one language stays in it. A template with no
+/// placeholder is returned as it is, unminted.
+fn substitute_message(
+    template: TermId,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    store: &mut TermStore,
+) -> TermId {
+    let Some(text) = store.lexical_form(template) else {
+        return template;
+    };
+    if !text.contains('{') {
+        return template;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut changed = false;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        // `{?x}` or `{$x}`, and nothing else counts as a placeholder.
+        let placeholder = after
+            .strip_prefix('?')
+            .or_else(|| after.strip_prefix('$'))
+            .and_then(|body| body.find('}').map(|close| (&body[..close], close)));
+        match placeholder {
+            Some((name, close)) if !name.is_empty() => {
+                // `after[..close + 1]` spans the sigil, the name and the brace.
+                let consumed = close + 2;
+                match lookup(name) {
+                    Some(value) => {
+                        out.push_str(&value);
+                        changed = true;
+                    }
+                    None => out.push_str(&rest[open..open + 1 + consumed]),
+                }
+                rest = &after[consumed..];
+            }
+            _ => {
+                out.push('{');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    if !changed {
+        return template;
+    }
+    let lang = store.language(template).map(str::to_owned);
+    let dir = store.direction(template);
+    let datatype = store
+        .datatype(template)
+        .and_then(|d| store.iri(d))
+        .unwrap_or("http://www.w3.org/2001/XMLSchema#string")
+        .to_owned();
+    store.literal_with_direction(&out, &datatype, lang.as_deref(), dir)
+}
+
+/// How a bound term reads inside a message: an IRI bare, a literal as its
+/// lexical form, a blank node by its label — the same rendering the report's
+/// `sh:value` uses for a JavaScript or Python caller.
+fn message_value(term: &oxrdf::Term) -> String {
+    match term {
+        oxrdf::Term::NamedNode(n) => n.as_str().to_owned(),
+        oxrdf::Term::BlankNode(b) => format!("_:{}", b.as_str()),
+        oxrdf::Term::Literal(l) => l.value().to_owned(),
+        other => other.to_string(),
+    }
+}
+
 const MAX_DEPTH: usize = 48;
 
 /// Focus sets smaller than this, in total, are validated sequentially.
@@ -524,11 +609,17 @@ impl Engine<'_> {
         let Some(n) = self.max_results else {
             return false;
         };
+        let default = self.vocab.default_disallows();
         match &self.blocking {
             None => results.len() >= n,
             // Linear, but only ever walked while a cap is set, and a cap keeps
             // the list short by construction.
             Some(severities) => {
+                let severities: &[TermId] = if severities.is_empty() {
+                    &default
+                } else {
+                    severities
+                };
                 results
                     .iter()
                     .filter(|r| severities.contains(&r.severity))
@@ -788,7 +879,12 @@ impl Engine<'_> {
         let mut r = ValidationResult::new(focus, component, shape.severity)
             .with_path(shape.path_node)
             .with_source_shape(shape.node);
-        r.messages.clone_from(&shape.messages);
+        // A message annotated onto the constraint itself speaks for results
+        // of that constraint; the shape's messages speak for the rest.
+        match shape.component_messages.get(&component) {
+            Some(annotated) => r.messages.clone_from(annotated),
+            None => r.messages.clone_from(&shape.messages),
+        }
         r
     }
 
@@ -901,16 +997,19 @@ impl Engine<'_> {
             Constraint::MaxLength(n) => {
                 per_value!(|value| self.str_len(value, store).is_some_and(|l| l <= *n as usize))
             }
-            Constraint::Pattern { regex, source } => {
+            Constraint::Pattern(regex) => {
                 for row in sets.rows() {
                     for &value in row.values {
                         // Blank nodes have no lexical form to match against.
                         let ok = store.kind(value) != TermKind::Blank
                             && store.lexical_form(value).is_some_and(|s| regex.is_match(s));
                         if !ok {
-                            let mut r = self.result(shape, component, row.focus).with_value(value);
-                            r.source_constraint = Some(*source);
-                            out.push(r);
+                            // No `sh:sourceConstraint`: that names the SPARQL
+                            // constraint or expression a result came from,
+                            // and a pattern is neither. It used to carry the
+                            // pattern literal, which the suite's `pattern-*`
+                            // reports do not have.
+                            out.push(self.result(shape, component, row.focus).with_value(value));
                         }
                     }
                 }
@@ -1317,9 +1416,13 @@ impl Engine<'_> {
                                 None => true,
                             };
                             if !ok {
-                                out.push(
-                                    self.result(shape, component, row.focus).with_value(value),
-                                );
+                                let mut r =
+                                    self.result(shape, component, row.focus).with_value(value);
+                                // The expression is the constraint the value
+                                // failed; the suite's `nodeByExpression-001`
+                                // reports it as `sh:sourceConstraint`.
+                                r.source_constraint = Some(*expr);
+                                out.push(r);
                             }
                         }
                     }
@@ -1354,9 +1457,34 @@ impl Engine<'_> {
                             let mut r = self
                                 .result(shape, cc.component, row.focus)
                                 .with_value(value);
-                            r.source_constraint = Some(cc.query.source);
+                            // No `sh:sourceConstraint`. The specification
+                            // gives it to `sh:sparql` constraints, whose node
+                            // is the constraint; a component's validator is
+                            // not, and the suite's `validator-001` reports
+                            // none.
                             if !cc.query.message.is_empty() {
-                                r.messages.clone_from(&cc.query.message);
+                                // A SELECT validator's solution is one row of
+                                // `solutions`; an ASK's has none, and the
+                                // parameters — `$this`, `$value`, and each
+                                // declared parameter — are what it can name.
+                                let solution = solutions.first();
+                                let lookup = |name: &str| {
+                                    solution
+                                        .and_then(|row| row.get(name))
+                                        .or_else(|| {
+                                            bindings
+                                                .iter()
+                                                .find(|(n, _)| *n == name)
+                                                .map(|(_, t)| t)
+                                        })
+                                        .map(message_value)
+                                };
+                                r.messages = cc
+                                    .query
+                                    .message
+                                    .iter()
+                                    .map(|&m| substitute_message(m, &lookup, store))
+                                    .collect();
                             }
                             out.push(r);
                         }
@@ -1422,9 +1550,15 @@ impl Engine<'_> {
                         .with_path(shape.path_node)
                         .with_source_shape(shape.node);
                 r.source_constraint = Some(sc.source);
-                r.messages.clone_from(&sc.message);
-                if r.messages.is_empty() {
+                if sc.message.is_empty() {
                     r.messages.clone_from(&shape.messages);
+                } else {
+                    let lookup = |name: &str| solution.get(name).map(message_value);
+                    r.messages = sc
+                        .message
+                        .iter()
+                        .map(|&m| substitute_message(m, &lookup, store))
+                        .collect();
                 }
 
                 // A solution may override the focus node, value and path. Terms

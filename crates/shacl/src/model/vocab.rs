@@ -49,10 +49,13 @@ vocab! {
         sh_description = "description",
         sh_order = "order",
 
-        // Severities
+        // Severities. SHACL 1.2 adds Debug and Trace below Info; only the
+        // first three break conformance unless a report says otherwise.
         sh_Violation = "Violation",
         sh_Warning = "Warning",
         sh_Info = "Info",
+        sh_Debug = "Debug",
+        sh_Trace = "Trace",
 
         // Targets
         sh_targetClass = "targetClass",
@@ -327,6 +330,19 @@ vocab! {
         sht_approved = "approved",
         sht_proposed = "proposed",
         sht_failure = "failure",
+    }
+}
+
+impl Vocab {
+    /// The severities that break conformance when a report declares no
+    /// `sh:conformanceDisallows`: `sh:Violation`, `sh:Warning`, `sh:Info`.
+    ///
+    /// In SHACL 1.0 these were every severity there was, so the rule read as
+    /// "conforms means no results". SHACL 1.2 added `sh:Debug` and `sh:Trace`
+    /// beneath them and kept the rule, which is why the two of them report
+    /// without blocking.
+    pub fn default_disallows(&self) -> [TermId; 3] {
+        [self.sh_Violation, self.sh_Warning, self.sh_Info]
     }
 }
 

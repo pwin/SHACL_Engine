@@ -47,13 +47,10 @@ fn report_graph(data: &str, shapes: &str) -> OxGraph {
     let compiled = Shapes::compile(&shapes_graph, &store, &vocab).expect("shapes should compile");
     let report = shacl::validate::validate_in(&data, &compiled, &shapes_graph, &mut store, &vocab)
         .expect("validation should run");
-    report.to_oxrdf(
-        &store,
-        &vocab,
-        &shapes_graph,
-        &compiled,
-        &[vocab.sh_Violation],
-    )
+    // The specification's default severities, which the expected reports
+    // below assume: an explicit list would be recorded as
+    // `sh:conformanceDisallows` and they carry none.
+    report.to_oxrdf(&store, &vocab, &shapes_graph, &compiled, &[])
 }
 
 /// An expected report, as the W3C manifests write them.
