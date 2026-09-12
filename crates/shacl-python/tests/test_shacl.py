@@ -199,8 +199,14 @@ ex:S a sh:NodeShape ;
     assert sorted(r.messages) == ["a name is required", "il faut un nom"]
     assert r.message in r.messages
 
-    # sh:Warning does not block conformance by default.
-    assert report.conforms
+    # Under the specification's default, a warning breaks conformance.
+    # `allow_warnings` is pySHACL's option for letting it stand.
+    assert not report.conforms
+    lenient = shapes.validate_turtle(
+        "@prefix ex: <http://ex/> . ex:a ex:other 1 .", allow_warnings=True
+    )
+    assert lenient.conforms
+    assert len(lenient.results) == 1, "the warning is still reported"
 
 
 def test_unknown_parse_format_is_rejected():
@@ -333,15 +339,25 @@ def test_stubs_match_the_module():
                 "base": "http://example.org/data",
                 "inference": "none",
                 "max_results": None,
+                "allow_warnings": False,
             },
         ),
         ("Shapes", "from_turtle", {"base": "http://example.org/shapes"}),
         (
             "Shapes",
             "validate_turtle",
-            {"base": "http://example.org/data", "inference": "none", "max_results": None},
+            {
+                "base": "http://example.org/data",
+                "inference": "none",
+                "max_results": None,
+                "allow_warnings": False,
+            },
         ),
-        ("Shapes", "validate_file", {"inference": "none", "max_results": None}),
+        (
+            "Shapes",
+            "validate_file",
+            {"inference": "none", "max_results": None, "allow_warnings": False},
+        ),
     ]:
         node = next(
             n
@@ -628,10 +644,14 @@ def test_max_results_stops_the_run():
 
 def test_max_results_counts_conformance_blocking_results_only():
     """The cap counts what breaks conformance, matching the CLI. Counting
-    every result would let a run stop on an `sh:Info` and report
+    every result would let a run stop on a non-blocking result and report
     `conforms = True` with a `sh:Violation` sitting unexamined further along:
     shapes are evaluated in compilation order, which says nothing about what
-    is in the graph."""
+    is in the graph.
+
+    Which results block depends on the setting. Under the default every
+    `sh:Info` result blocks, so it counts; with `allow_warnings=True` only
+    violations do, and only they count."""
     shapes = shacl.Shapes.from_turtle("""
         @prefix sh: <http://www.w3.org/ns/shacl#> .
         @prefix ex: <http://ex/> .
@@ -641,18 +661,15 @@ def test_max_results_counts_conformance_blocking_results_only():
           sh:property [ sh:path ex:b ; sh:minCount 1 ] .
     """)
     data = "@prefix ex: <http://ex/> .\n" + "\n".join(f"ex:n{i} a ex:T ." for i in range(10))
-    capped = shacl.Shapes.from_turtle("""
-        @prefix sh: <http://www.w3.org/ns/shacl#> .
-        @prefix ex: <http://ex/> .
-        ex:Info a sh:NodeShape ; sh:targetClass ex:T ;
-          sh:property [ sh:path ex:a ; sh:minCount 1 ; sh:severity sh:Info ] .
-        ex:Blocking a sh:NodeShape ; sh:targetClass ex:T ;
-          sh:property [ sh:path ex:b ; sh:minCount 1 ] .
-    """).validate_turtle(data, max_results=3)
-    blocking = [r for r in capped.results if r.severity == "Violation"]
+
+    lenient = shapes.validate_turtle(data, max_results=3, allow_warnings=True)
+    blocking = [r for r in lenient.results if r.severity == "Violation"]
     assert len(blocking) == 3, "the cap counts blocking results"
-    assert capped.conforms is False, "a cap must never turn a failing graph into a passing one"
-    del shapes
+    assert lenient.conforms is False, "a cap must never turn a failing graph into a passing one"
+
+    strict = shapes.validate_turtle(data, max_results=3)
+    assert len(strict.results) == 3, "under the default, info results block and so count"
+    assert strict.conforms is False
 
 
 def test_max_results_none_is_the_default_and_reports_everything():

@@ -28,6 +28,21 @@ echo
 echo "==> tests"
 cargo test --workspace --quiet
 
+# The Python tests are not part of `cargo test`. CI runs them in the wheel
+# smoke test, which is too late: a tag whose wheels fail produces no release.
+# They need the current module installed; `maturin develop` does that when
+# it is available.
+echo
+echo "==> python tests"
+PYTEST="${PYTEST:-.venv/Scripts/pytest.exe}"
+[ -x "$PYTEST" ] || PYTEST="${PYTEST%.exe}"
+if [ -x "$PYTEST" ]; then
+  "$PYTEST" crates/shacl-python/tests -q
+else
+  echo "  pytest not found at $PYTEST; set PYTEST=/path/to/pytest to run them."
+  echo "  Skipping is how a broken wheel reaches a tag."
+fi
+
 echo
 echo "==> cli"
 cargo build --release -p shacl-cli
