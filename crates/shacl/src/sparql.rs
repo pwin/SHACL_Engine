@@ -314,18 +314,35 @@ fn unsupported_in(
             recurse(inner)
         }
         G::Project { inner, variables } => {
-            // A subquery must return `$this`, so the pre-binding reaches it.
-            // The suite's `pre-binding-006` (a `SELECT *` over a pattern that
-            // binds nothing) and `unsupported-sparql-004` (a projection of
-            // other variables) are both refused; `pre-binding-007`, whose
-            // subquery projects `$this` alone, is accepted. Only `$this` is
-            // required: the other pre-bound variables need not be projected
-            // to be usable, and requiring them would refuse that test.
+            // A subquery that uses `$this` must also return it.
+            //
+            // SHACL 5.3.2 states this without the first clause: every
+            // subquery must project every potentially pre-bound variable.
+            // That rule is written for an engine that pre-binds by *initial
+            // bindings*, where a value reaches a subquery only by being
+            // projected out of it. This engine pre-binds by *substitution*,
+            // which replaces the variable wherever it occurs before the query
+            // runs, so a subquery with no occurrence of `$this` has nothing to
+            // carry and is perfectly well defined.
+            //
+            // Applying the letter of the rule refuses ordinary shapes. A
+            // graph-wide aggregate — `{ SELECT (COUNT(?node) AS ?total) WHERE
+            // { ?node ?p ?o } }` joined against a pattern on `$this` — cannot
+            // project `$this`: it does not mention it, and a substituted
+            // constant cannot be projected at all. Three such checks in the
+            // consolidated ontology suite broke on the stricter reading.
+            //
+            // The cost is the suite's `unsupported-sparql-004`, whose
+            // subquery projects other variables and never mentions `$this`;
+            // it expects a failure and now gets an answer. `pre-binding-006`
+            // still fails as it should: its subquery filters on `$this` and
+            // projects nothing.
             if !outermost
                 && prebound.contains(&"this")
                 && !variables.iter().any(|v| v.as_str() == "this")
+                && mentions_variable(inner, "this")
             {
-                return Some("a subquery that does not return $this");
+                return Some("a subquery that uses $this without returning it");
             }
             recurse(inner)
         }
@@ -341,6 +358,27 @@ fn unsupported_in(
         G::Filter { inner, .. } | G::Graph { inner, .. } | G::Group { inner, .. } => recurse(inner),
         _ => None,
     }
+}
+
+/// Whether `name` occurs anywhere in `p`, at any depth.
+///
+/// Used to tell a subquery that needs a pre-bound variable from one that is
+/// independent of it. Walks the pattern rather than the folded query, because
+/// the question is about occurrences inside this branch alone.
+fn mentions_variable(p: &spargebra::algebra::GraphPattern, name: &str) -> bool {
+    // `Cell` because `fold_pattern` takes an `Fn`, as `mentions` above does
+    // for the same reason.
+    let found = std::cell::Cell::new(false);
+    let probe = |v: &Variable| -> Option<Term> {
+        if v.as_str() == name {
+            found.set(true);
+        }
+        None
+    };
+    // `fold_pattern` visits every variable position the substitution would,
+    // which is exactly the set of places an occurrence could matter.
+    fold_pattern(p, &probe);
+    found.get()
 }
 
 /// Pre-bound variables and the terms they stand for.

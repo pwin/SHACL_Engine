@@ -268,19 +268,42 @@ sequence. Expected and actual reports are compared two ways — result by
 result through one in-memory representation, and as RDF graphs the way the
 suite itself specifies (below) — and both have to agree.
 
-**426 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
+**425 of 426** tests pass. Core SHACL 1.0 and 1.2 constraints, property paths,
 SPARQL-based constraints with pre-binding, user-declared constraint components,
 the node expression algebra including its SPARQL forms, SPARQL-selected targets,
-`sh:values`, and RDF 1.2 annotations are all implemented. `KNOWN_FAILURES` in
-`tests/w3c.rs` is empty; the suite asserts that the set of failing tests matches
-that list exactly, so a regression is reported by name.
+`sh:values`, and RDF 1.2 annotations are all implemented. The one that remains
+is named, with the reason, in `KNOWN_FAILURES` in `tests/w3c.rs`; the suite
+asserts that the set of failing tests matches that list exactly, so a
+regression is reported by name.
 
-The last eight were fixed in 0.3.0: per-constraint `sh:severity` annotations,
-`sh:reificationRequired`, `sh:values` with `sh:select` and `sh:sparqlExpr`,
-global prefix declarations on an `sh:ShapesGraph` node, and the rule that a
-subquery must return `$this`. One test, `seconds-example`, expects the decimal
-zero spelled `"00"`; the harness compares numeric literals by value, as SPARQL
-does, and the test passes on the value rather than on the spelling.
+Seven of the eight remaining failures were fixed in 0.3.0: per-constraint
+`sh:severity` annotations, `sh:reificationRequired`, `sh:values` with
+`sh:select` and `sh:sparqlExpr`, and global prefix declarations on an
+`sh:ShapesGraph` node. One test, `seconds-example`, expects the decimal zero
+spelled `"00"`; the harness compares numeric literals by value, as SPARQL
+does, so it passes on the value rather than on the spelling.
+
+### The one that does not pass
+
+`unsupported-sparql-004` expects a validation failure for a query whose
+subquery projects other variables and never mentions `$this`. SHACL 5.3.2
+requires every subquery to project every potentially pre-bound variable.
+
+That rule is written for an engine that pre-binds by *initial bindings*, where
+a value reaches a subquery only by being projected out of it. This engine
+pre-binds by *substitution*, replacing the variable wherever it occurs before
+the query runs, so a subquery containing no occurrence of `$this` has nothing
+to carry and is well defined without projecting it.
+
+0.3.0 briefly enforced the letter of the rule and passed all 426. It also
+refused ordinary shapes: a graph-wide aggregate such as
+`{ SELECT (COUNT(?node) AS ?total) WHERE { ?node ?p ?o } }`, joined against a
+pattern on `$this`, cannot project `$this` — it does not mention it, and a
+substituted constant cannot be projected at all. Three checks in a production
+shapes set broke on it. The rule now applies only to a subquery that uses
+`$this` without returning it, which is the case the rule protects against;
+`pre-binding-006`, whose subquery filters on `$this` and projects nothing,
+still fails as it should.
 
 ### Compared the way the suite compares
 
@@ -297,9 +320,9 @@ The harness now runs that comparison alongside its own, reports both, and
 asserts they agree on every passing test:
 
 ```
-  shacl10    120/120 passing  (0 could not run)   as graphs: 113/113
+  shacl10    119/120 passing  (0 could not run)   as graphs: 113/113
   shacl12    306/306 passing  (0 could not run)   as graphs: 158/158
-  TOTAL      426/426 passing                        as graphs: 271/271
+  TOTAL      425/426 passing                        as graphs: 271/271
 ```
 
 The second column counts the tests that produce a report at all; the rest
@@ -720,7 +743,7 @@ under [where rule authors have to be careful](#where-rule-authors-have-to-be-car
 An unrecognised mode is an error rather than a silent `none`.
 
 `parallel` is off in this build — there are no threads to split a parse
-across — so it takes the sequential path. Conformance is the same 426 of 426
+across — so it takes the sequential path. Conformance is the same 425 of 426
 either way, and the WebAssembly build is checked against the native one over
 every document in the W3C suite; see `crates/shacl-wasm/differential.js`.
 
