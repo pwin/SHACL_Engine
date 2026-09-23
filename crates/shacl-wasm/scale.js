@@ -241,5 +241,41 @@ console.log('\n== SHACL-AF rules through the WASM API ==');
   check('shapes may be omitted', validateTurtle(shapes + data, null, BASE).length, 1);
 }
 
+// ------------------------------------------------- what conforms means
+//
+// The wasm binding passed [sh:Violation] to the engine's `conforms` long
+// after the CLI and the Python bindings had moved to the specification's
+// default, so 0.3.0 and 0.3.1 told a JavaScript caller that a graph with
+// warnings conformed while every other surface said it did not. Nothing
+// caught it, because no test here asserted a verdict for a report whose
+// results are all warnings. This is that test.
+{
+  console.log('== what conforms means ==');
+  const shapes = `
+    @prefix sh: <http://www.w3.org/ns/shacl#> .
+    @prefix ex: <http://example.org/> .
+    ex:S a sh:NodeShape ; sh:targetNode ex:a ;
+      sh:property [ sh:path ex:name ; sh:minCount 1 ; sh:severity sh:Warning ] .
+  `;
+  const data = '@prefix ex: <http://example.org/> . ex:a ex:other 1 .';
+  const warned = Validator.fromTurtle(shapes, BASE).validateTurtle(data, BASE);
+  check('a warning is reported', warned.length, 1);
+  check('a warning breaks conformance', warned.conforms, false);
+  check('and the report says so', warned.toTurtle().includes('sh:conforms false'), true);
+
+  // sh:Debug is one of the two SHACL 1.2 severities that report without
+  // blocking, so it is the other half of the same rule.
+  const debug = Validator.fromTurtle(
+    shapes.replace('sh:Warning', 'sh:Debug'),
+    BASE,
+  ).validateTurtle(data, BASE);
+  check('a debug result is reported', debug.length, 1);
+  check('a debug result does not break conformance', debug.conforms, true);
+
+  const clean = Validator.fromTurtle(shapes, BASE)
+    .validateTurtle('@prefix ex: <http://example.org/> . ex:a ex:name "n" .', BASE);
+  check('nothing reported still conforms', clean.conforms, true);
+}
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED'}`);
 process.exit(failures === 0 ? 0 : 1);
