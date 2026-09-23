@@ -70,8 +70,15 @@ pub struct Report {
 
 #[wasm_bindgen]
 impl Report {
-    /// True when nothing in the report has a conformance-blocking severity
-    /// (`sh:Violation`).
+    /// True when the report holds no result of a conformance-blocking
+    /// severity.
+    ///
+    /// Those are `sh:Violation`, `sh:Warning` and `sh:Info`, which is what
+    /// the specification defines when a report declares no
+    /// `sh:conformanceDisallows`. SHACL 1.2's `sh:Debug` and `sh:Trace`
+    /// report without blocking. Until 0.3.2 this counted violations alone,
+    /// which is pySHACL's `--allow-warnings` reading rather than its default;
+    /// a caller who wants that reading can judge `results` by severity.
     #[wasm_bindgen(getter)]
     pub fn conforms(&self) -> bool {
         self.conforms
@@ -236,7 +243,16 @@ impl Validator {
     }
 
     fn build_report(&self, report: ValidationReport, store: &TermStore) -> Result<Report, JsValue> {
-        let disallowed = [self.vocab.sh_Violation];
+        // Empty means the specification's default: `sh:Violation`,
+        // `sh:Warning` and `sh:Info` all break conformance, while SHACL 1.2's
+        // `sh:Debug` and `sh:Trace` report without doing so. Passing
+        // `[sh:Violation]` here, as this did until 0.3.2, is pySHACL's
+        // `--allow-warnings` reading; a caller who wants it can judge
+        // `results` by severity, which carries every result either way.
+        //
+        // An empty list also keeps `sh:conformanceDisallows` out of the
+        // serialised report, which is what its absence means.
+        let disallowed: [TermId; 0] = [];
         let conforms = report.conforms(&disallowed, &self.vocab);
         let turtle = report
             .serialize(
