@@ -339,11 +339,9 @@ impl TermStore {
                 l.value(),
                 l.datatype().as_str(),
                 l.language(),
-                l.direction().map(|d| match d {
-                    oxrdf::BaseDirection::Ltr => Direction::Ltr,
-                    oxrdf::BaseDirection::Rtl => Direction::Rtl,
-                }),
+                direction_of(l),
             ),
+            #[cfg(feature = "rdf-12")]
             TermRef::Triple(t) => {
                 let s = self.intern_oxrdf(TermRef::from(t.subject.as_ref()), scope);
                 let p = self.named_node(t.predicate.as_str());
@@ -469,11 +467,9 @@ impl TermStore {
                     Some(t) => Some(self.strings.get(t)?),
                     None => None,
                 },
-                dir: l.direction().map(|d| match d {
-                    oxrdf::BaseDirection::Ltr => Direction::Ltr,
-                    oxrdf::BaseDirection::Rtl => Direction::Rtl,
-                }),
+                dir: direction_of(l),
             },
+            #[cfg(feature = "rdf-12")]
             TermRef::Triple(_) => return None,
         };
         self.lookup.get(&data).copied()
@@ -495,6 +491,7 @@ impl TermStore {
     pub fn resolve_rendered(&self, term: TermRef<'_>) -> Option<TermId> {
         match term {
             TermRef::BlankNode(b) => self.blank_node_from_output_label(b.as_str()),
+            #[cfg(feature = "rdf-12")]
             TermRef::Triple(t) => {
                 // Components recurse, since any of them may itself be a blank
                 // node or a nested triple term.
@@ -556,6 +553,7 @@ impl TermStore {
             } => {
                 let value = self.strings.resolve(lex);
                 let lit = match (lang, dir) {
+                    #[cfg(feature = "rdf-12")]
                     (Some(l), Some(d)) => {
                         return Term::Literal(
                             oxrdf::Literal::new_directional_language_tagged_literal_unchecked(
@@ -568,7 +566,9 @@ impl TermStore {
                             ),
                         );
                     }
-                    (Some(l), None) => LiteralRef::new_language_tagged_literal_unchecked(
+                    // Without `rdf-12` there are no base directions to write: a
+                    // literal held with one is written with its language tag only.
+                    (Some(l), _) => LiteralRef::new_language_tagged_literal_unchecked(
                         value,
                         self.strings.resolve(l),
                     ),
@@ -579,6 +579,7 @@ impl TermStore {
                 };
                 Term::Literal(lit.into_owned())
             }
+            #[cfg(feature = "rdf-12")]
             TermData::Triple(i) => {
                 let [s, p, o] = self.triple_terms[i as usize];
                 let subject = match self.to_oxrdf(s) {
@@ -595,6 +596,13 @@ impl TermStore {
                     object: self.to_oxrdf(o),
                 }))
             }
+            // An RDF 1.1 build reads no triple terms, so the store holds one only if
+            // it was given one directly (or by an index file an RDF 1.2 build wrote).
+            // oxrdf cannot express it; it is written as a blank node standing for it.
+            #[cfg(not(feature = "rdf-12"))]
+            TermData::Triple(i) => {
+                Term::BlankNode(oxrdf::BlankNode::new_unchecked(format!("tripleterm{i}")))
+            }
         }
     }
 
@@ -605,6 +613,21 @@ impl TermStore {
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty()
     }
+}
+
+/// A literal's base direction (RDF 1.2), in the store's terms.
+#[cfg(feature = "rdf-12")]
+fn direction_of(l: oxrdf::LiteralRef<'_>) -> Option<Direction> {
+    l.direction().map(|d| match d {
+        oxrdf::BaseDirection::Ltr => Direction::Ltr,
+        oxrdf::BaseDirection::Rtl => Direction::Rtl,
+    })
+}
+
+/// Without `rdf-12`, oxrdf's literals have no base direction.
+#[cfg(not(feature = "rdf-12"))]
+fn direction_of(_: oxrdf::LiteralRef<'_>) -> Option<Direction> {
+    None
 }
 
 #[cfg(test)]

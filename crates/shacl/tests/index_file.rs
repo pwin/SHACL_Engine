@@ -17,9 +17,11 @@ use shacl::model::index::{self, SourceDigest};
 use shacl::model::{Graph, GraphBuilder, TermStore, Vocab, loader};
 
 /// Data exercising the parts of a store that are easy to lose in a round trip:
-/// blank nodes whose numbering must be preserved, every literal shape, and an
-/// RDF 1.2 triple term.
-const DATA: &str = r#"
+/// blank nodes whose numbering must be preserved, every literal shape, and (with
+/// `rdf-12`) an RDF 1.2 triple term.
+macro_rules! data {
+    () => {
+        r#"
 @prefix ex: <http://example.org/> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
@@ -34,8 +36,19 @@ ex:alice a ex:Person ;
 ex:dave a ex:Person ;
     ex:name "Dave", "David" .
 
-<< ex:alice ex:knows ex:dave >> ex:certainty 0.9 .
-"#;
+"#
+    };
+}
+
+/// The data, with the triple term only where RDF 1.2 is read.
+const DATA: &str = if cfg!(feature = "rdf-12") {
+    concat!(
+        data!(),
+        "<< ex:alice ex:knows ex:dave >> ex:certainty 0.9 .\n"
+    )
+} else {
+    data!()
+};
 
 const SHAPES: &str = r#"
 @prefix sh: <http://www.w3.org/ns/shacl#> .

@@ -14,6 +14,24 @@ with the W3C SHACL 1.0 and 1.2 test suites.
 | `testsuite/shacl10` | W3C `data-shapes-test-suite`, copied in |
 | `testsuite/shacl12` | W3C `shacl12-test-suite`, copied in |
 
+### Features of the `shacl` crate
+
+| Feature | Default | What it does |
+| --- | --- | --- |
+| `parallel` | on | Splits the Turtle parse across threads (rayon); off for WebAssembly |
+| `rdf-12` | on | RDF 1.2 and SPARQL 1.2: triple terms, annotations, base directions, in data, shapes and SHACL-SPARQL |
+
+Embedding the engine in an RDF 1.1 tool, leave `rdf-12` out:
+
+```toml
+shacl = { git = "https://github.com/pwin/SHACL_Engine", default-features = false, features = ["parallel"] }
+```
+
+Cargo turns a feature on for every crate in a build, so with `rdf-12` the Oxigraph crates
+parse RDF 1.2 for the rest of that build too; without it they read RDF 1.1 only, and so does
+the engine. An RDF 1.1 build passes the W3C suites except the 16 documents of the SHACL 1.2
+suite that are written in RDF 1.2 (`RDF_12_DOCUMENTS` in `tests/w3c.rs`, checked by CI).
+
 ## Performance
 
 Against pySHACL 0.40.1 on synthetic data, best of three, with identical result

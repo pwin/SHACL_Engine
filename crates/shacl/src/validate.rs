@@ -486,6 +486,8 @@ fn message_value(term: &oxrdf::Term) -> String {
         oxrdf::Term::NamedNode(n) => n.as_str().to_owned(),
         oxrdf::Term::BlankNode(b) => format!("_:{}", b.as_str()),
         oxrdf::Term::Literal(l) => l.value().to_owned(),
+        // a triple term
+        #[cfg(feature = "rdf-12")]
         other => other.to_string(),
     }
 }
