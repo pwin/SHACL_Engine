@@ -47,6 +47,20 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo fmt --all --check
 
+  # The engine without RDF 1.2, as an RDF 1.1 tool embeds it: it must build
+  # without the Oxigraph crates' RDF 1.2 types, and pass the W3C suites but for
+  # the documents written in RDF 1.2, which `tests/w3c.rs` names.
+  rdf-11:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p shacl --all-targets --no-default-features --features parallel -- -D warnings
+      - run: cargo test -p shacl --no-default-features --features parallel
+
   # A release build behaves differently from a debug one — different overflow
   # behaviour, and much smaller stack frames, which is what the recursion depth
   # limit is calibrated against. The examples double as a CLI smoke test.

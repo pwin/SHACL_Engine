@@ -16,8 +16,9 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 # `default-features = false` drops `parallel` (rayon), which cannot build for
 # wasm32 -- there are no threads to split the Turtle parse across. See the
-# `parallel` feature's note in ../shacl/Cargo.toml.
-engine = { package = "shacl", path = "../shacl", default-features = false }
+# `parallel` feature's note in ../shacl/Cargo.toml. `rdf-12` is asked for again,
+# since it is a default feature too.
+engine = { package = "shacl", path = "../shacl", default-features = false, features = ["rdf-12"] }
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"

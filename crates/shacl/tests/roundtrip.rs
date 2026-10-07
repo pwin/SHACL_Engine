@@ -23,10 +23,8 @@ use shacl::sparql;
 fn every_kind(store: &mut TermStore) -> Vec<(&'static str, TermId)> {
     let xsd = "http://www.w3.org/2001/XMLSchema#";
     const RDF_LANG_STRING: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
-    let s = store.named_node("http://example.org/s");
-    let p = store.named_node("http://example.org/p");
-    let o = store.named_node("http://example.org/o");
-    vec![
+    #[allow(unused_mut)]
+    let mut kinds = vec![
         ("iri", store.named_node("http://example.org/thing")),
         // A percent-encoded IRI, because the renderer must not re-encode.
         (
@@ -75,8 +73,16 @@ fn every_kind(store: &mut TermStore) -> Vec<(&'static str, TermId)> {
             "language literal",
             store.literal("bonjour", RDF_LANG_STRING, Some("fr")),
         ),
-        ("triple term", store.triple_term(s, p, o)),
-    ]
+    ];
+    // RDF 1.2: without it, oxrdf has no term to write a triple term as.
+    #[cfg(feature = "rdf-12")]
+    {
+        let s = store.named_node("http://example.org/s");
+        let p = store.named_node("http://example.org/p");
+        let o = store.named_node("http://example.org/o");
+        kinds.push(("triple term", store.triple_term(s, p, o)));
+    }
+    kinds
 }
 
 /// The store's own boundary: `to_oxrdf` out, `get_term` back.

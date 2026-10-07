@@ -8,8 +8,17 @@ description = "A high-performance SHACL validation engine"
 
 [features]
 # On by default, so a plain `cargo build`/`cargo test` and every existing
-# consumer keep the multi-threaded Turtle parse with no change.
-default = ["parallel"]
+# consumer keep the multi-threaded Turtle parse and RDF 1.2 with no change.
+default = ["parallel", "rdf-12"]
+# RDF 1.2 and SPARQL 1.2: triple terms and base directions, in the data, the
+# shapes and SHACL-SPARQL. Turn it off (`default-features = false`) for an RDF 1.1
+# build -- one that embeds the engine in an RDF 1.1 tool. Cargo enables a feature
+# for every crate in a build, so with it on, the Oxigraph crates parse RDF 1.2
+# for everything else in that build too.
+#
+# `sparql-12` must track `rdf-12`: enabling triple terms in the term model
+# without it leaves the SPARQL crates unable to match on `Term::Triple`.
+rdf-12 = ["oxrdf/rdf-12", "oxrdfio/rdf-12", "oxttl/rdf-12", "spargebra/sparql-12", "spareval/sparql-12"]
 # Splits the Turtle parse across worker threads (rayon). Turn it off for
 # targets with no threads to split across -- `wasm32-unknown-unknown` in
 # particular, where rayon cannot build at all. With it off the loader takes the
@@ -21,7 +30,7 @@ parallel = ["dep:rayon"]
 [dependencies]
 oxrdf.workspace = true
 oxrdfio.workspace = true
-oxttl = { version = "0.2", features = ["rdf-12"] }
+oxttl = "0.2"
 oxsdatatypes.workspace = true
 spargebra.workspace = true
 spareval.workspace = true

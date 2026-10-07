@@ -982,6 +982,42 @@ const BASELINE_PASSING: usize = 425;
 /// test is named in the failure rather than just shrinking a number.
 const KNOWN_FAILURES: &[&str] = &["sparql/pre-binding/unsupported-sparql-004"];
 
+/// The documents of the suite that are RDF 1.2 (by path under
+/// `testsuite/shacl12/tests`): annotations (`{| |}`), triple terms (`<<( )>>`),
+/// base directions (`"x"@ar--ltr`), `rdf:reifies` and SPARQL 1.2's functions. A
+/// build without the `rdf-12` feature cannot read them, so their tests fail there,
+/// and only there; `progress` checks that every one of them does.
+const RDF_12_DOCUMENTS: &[&str] = &[
+    "core/misc/deactivated-003.ttl",
+    "core/misc/message-002.ttl",
+    "core/misc/severity-003.ttl",
+    "core/property/reifierShape-001.ttl",
+    "core/property/reifierShape-002.ttl",
+    "core/property/uniqueLang-003.ttl",
+    "node-expr/shnex/constant.ttl",
+    "node-expr/shnex-sparql/hasLangdir.ttl",
+    "node-expr/shnex-sparql/isTriple.ttl",
+    "node-expr/shnex-sparql/langdir.ttl",
+    "node-expr/shnex-sparql/object.ttl",
+    "node-expr/shnex-sparql/predicate.ttl",
+    "node-expr/shnex-sparql/strlangdir.ttl",
+    "node-expr/shnex-sparql/subject.ttl",
+    "node-expr/shnex-sparql/triple.ttl",
+    "sparql/rules/run-once-example.ttl",
+];
+
+/// What passes in a build without `rdf-12`: everything but the tests of
+/// [`RDF_12_DOCUMENTS`].
+const BASELINE_PASSING_RDF_11: usize = 408;
+
+/// Whether a test comes from one of the RDF 1.2 documents.
+fn in_rdf_12_document(name: &str) -> bool {
+    let name = name.replace('\\', "/");
+    RDF_12_DOCUMENTS
+        .iter()
+        .any(|d| name.ends_with(&format!("shacl12/tests/{d}")))
+}
+
 /// The README's conformance figures must match the suite.
 ///
 /// They have drifted twice: prose is not checked by anything, so it goes stale
@@ -1037,9 +1073,14 @@ fn progress() {
         .iter()
         .filter(|o| matches!(o.status, Status::Pass))
         .count();
+    let baseline = if cfg!(feature = "rdf-12") {
+        BASELINE_PASSING
+    } else {
+        BASELINE_PASSING_RDF_11
+    };
     assert!(
-        pass >= BASELINE_PASSING,
-        "regression: {pass} passing, baseline is {BASELINE_PASSING}"
+        pass >= baseline,
+        "regression: {pass} passing, baseline is {baseline}"
     );
 
     // Name what is failing, not just how much. A count alone cannot tell a
@@ -1051,6 +1092,25 @@ fn progress() {
         .map(|o| o.name.as_str())
         .collect();
     failing.sort_unstable();
+    if !cfg!(feature = "rdf-12") {
+        // Without RDF 1.2 these documents cannot be read: each must fail, and no
+        // other test may fail because of it.
+        let unread: Vec<&str> = RDF_12_DOCUMENTS
+            .iter()
+            .copied()
+            .filter(|d| {
+                !failing.iter().any(|n| {
+                    n.replace('\\', "/")
+                        .ends_with(&format!("shacl12/tests/{d}"))
+                })
+            })
+            .collect();
+        assert!(
+            unread.is_empty(),
+            "these are in RDF_12_DOCUMENTS but pass without rdf-12: {unread:#?}"
+        );
+        failing.retain(|n| !in_rdf_12_document(n));
+    }
     let mut known: Vec<&str> = KNOWN_FAILURES.to_vec();
     known.sort_unstable();
 

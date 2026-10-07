@@ -16,12 +16,12 @@ repository = "https://github.com/pwin/SHACL_Engine"
 
 [workspace.dependencies]
 oxrdf = { version = "0.3", features = ["oxsdatatypes", "rdfc-10"] }
-oxrdfio = { version = "0.2", features = ["rdf-12"] }
+oxrdfio = "0.2"
 oxsdatatypes = "0.2"
-# `sparql-12` must track oxrdf's `rdf-12`: enabling triple terms in the term
-# model without it leaves the SPARQL crates unable to match on `Term::Triple`.
-spargebra = { version = "0.4", features = ["sparql-12"] }
-spareval = { version = "0.2", features = ["sparql-12"] }
+# RDF 1.2 (`rdf-12`, `sparql-12`) is a feature of the `shacl` crate, on by
+# default: see its Cargo.toml. It is not set here, so that a build can leave it off.
+spargebra = "0.4"
+spareval = "0.2"
 rayon = "1.12"
 hashbrown = "0.16"
 regex = "1"
