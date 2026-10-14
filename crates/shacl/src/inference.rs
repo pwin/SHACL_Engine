@@ -29,8 +29,8 @@
 //! which would inflate a graph several times over for nothing.
 
 use crate::error::{Error, Result};
-use crate::model::{loader, scope, Graph, GraphBuilder, TermId, TermStore, Vocab};
-use crate::report::{serialize_graph, OxGraph, RdfFormat};
+use crate::model::{Graph, GraphBuilder, TermId, TermStore, Vocab, loader, scope};
+use crate::report::{OxGraph, RdfFormat, serialize_graph};
 
 /// The RDFS closure of a Turtle document, as Turtle.
 ///
@@ -261,7 +261,10 @@ mod tests {
         // rdfs7: a sub-property use entails the super-property use. This is
         // the one SHACL itself will not resolve, which is why materialising
         // exists at all.
-        assert!(out.contains("parent"), "missing the entailed property: {out}");
+        assert!(
+            out.contains("parent"),
+            "missing the entailed property: {out}"
+        );
     }
 
     #[test]
@@ -291,7 +294,10 @@ ex:a ex:p ex:b .
             "http://t/",
         )
         .expect("the closure should serialise");
-        assert!(out.contains("http://t/p") || out.contains("ex:p"), "lost the only triple: {out}");
+        assert!(
+            out.contains("http://t/p") || out.contains("ex:p"),
+            "lost the only triple: {out}"
+        );
     }
 
     #[test]
@@ -321,7 +327,10 @@ ex:a ex:p ex:b .
             "a literal-subject triple reached the output: {out}"
         );
         // The input itself must survive.
-        assert!(out.contains("dave@example.com"), "lost the original triple: {out}");
+        assert!(
+            out.contains("dave@example.com"),
+            "lost the original triple: {out}"
+        );
     }
 
     /// Asserts a triple is present, naming it readably when it is not.
