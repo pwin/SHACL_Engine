@@ -116,6 +116,22 @@ impl Report {
 /// bound and the advertised path (compile once, validate many) is precisely the
 /// one that degrades. Measured on 100k instances / 400k triples: 23.7s sharing
 /// one store against 6.5s cloning per run, and the gap widens with every run.
+/// The RDFS closure of a Turtle document, as Turtle.
+///
+/// For a caller that reads the same graph more than once -- validating it here
+/// and querying it elsewhere -- and needs both to see the same entailments.
+/// Close the graph once with this, give the result to everything that reads
+/// it, and validate with `inference` left at `none`, because by then the
+/// entailed triples are real ones.
+///
+/// A second closure computed on the JavaScript side would be the thing to
+/// avoid: two implementations to disagree instead of two graphs.
+#[wasm_bindgen(js_name = rdfsClosure)]
+pub fn rdfs_closure_turtle(text: &str, base: Option<String>) -> Result<String, JsValue> {
+    let base = base.unwrap_or_else(|| "http://example.org/data".to_string());
+    inference::rdfs_closure_turtle(text, &base).map_err(err)
+}
+
 #[wasm_bindgen]
 pub struct Validator {
     store: TermStore,

@@ -29,7 +29,78 @@
 //! which would inflate a graph several times over for nothing.
 
 use crate::error::{Error, Result};
-use crate::model::{Graph, GraphBuilder, TermId, Vocab};
+use crate::model::{loader, scope, Graph, GraphBuilder, TermId, TermStore, Vocab};
+use crate::report::{serialize_graph, OxGraph, RdfFormat};
+
+/// The RDFS closure of a Turtle document, as Turtle.
+///
+/// Exists so that a caller validating with `inference = "rdfs"` can obtain the
+/// *same* closure this crate materialises, rather than approximating it.
+///
+/// The Ontology Quality Suite runs every check twice — once as a SHACL shape
+/// and once as a portable SPARQL query — and compares the two for drift. Only
+/// the shape arm went through `validate`, so only it saw the entailed triples:
+/// the two arms were reading different graphs and their findings were then
+/// merged as though they were one. Measured on one ontology, that was 479
+/// findings against 497 for the same run.
+///
+/// Reimplementing RDFS on the caller's side would have reintroduced the same
+/// problem one level up — two closures to disagree instead of two graphs — so
+/// the fix is for this crate to hand its own closure out. The caller closes
+/// the graph once, passes it to both arms, and validates with
+/// `inference = "none"` because the entailments are already real triples.
+///
+/// The closure is the one documented at the top of this module: the six rules
+/// that add triples a validator can act on, and not the axiomatic ones. A
+/// general-purpose RDFS reasoner is the wrong tool here — typing every term
+/// `rdfs:Resource` turned a two-triple document into twelve in the suite's own
+/// measurement, all of it noise no shape improves on.
+pub fn rdfs_closure_turtle(text: &str, base: &str) -> Result<String> {
+    let mut store = TermStore::new();
+    let vocab = Vocab::new(&mut store);
+    let mut builder = GraphBuilder::new();
+    loader::parse_str(
+        text,
+        RdfFormat::Turtle,
+        base,
+        scope::DATA,
+        &mut store,
+        &mut builder,
+    )?;
+
+    let closed = rdfs_closure(&builder.build(), &vocab)?;
+
+    // Entailments RDF cannot express are dropped rather than refused.
+    //
+    // rdfs3 puts an object in the subject position -- `p rdfs:range c` and
+    // `x p y` entails `y rdf:type c` -- so a property with a declared range
+    // and a literal value entails `"dave@example.com" rdf:type c`. RDFS says
+    // that is entailed; RDF has no syntax for it. The internal graph holds
+    // such generalised triples happily, which is why validating with
+    // `inference = "rdfs"` never hit this, and why serialising the same
+    // closure did: the first real ontology tried produced one immediately.
+    //
+    // Dropping them is also what makes the closure shareable, which is the
+    // point of this function. No RDF graph can hold a literal-subject triple,
+    // so nothing downstream -- a SPARQL engine, a second validator, a file on
+    // disk -- could ever see one. Keeping them would mean the caller's copy of
+    // the closure and this crate's differed, which is the divergence the
+    // function exists to remove.
+    let mut out = OxGraph::new();
+    for [s, p, o] in closed.iter() {
+        let subject = match store.to_oxrdf(s) {
+            oxrdf::Term::NamedNode(n) => oxrdf::NamedOrBlankNode::NamedNode(n),
+            oxrdf::Term::BlankNode(b) => oxrdf::NamedOrBlankNode::BlankNode(b),
+            _ => continue,
+        };
+        let predicate = match store.to_oxrdf(p) {
+            oxrdf::Term::NamedNode(n) => n,
+            _ => continue,
+        };
+        out.insert(&oxrdf::Triple::new(subject, predicate, store.to_oxrdf(o)));
+    }
+    serialize_graph(&out, RdfFormat::Turtle)
+}
 
 /// How large the closure may grow before it is abandoned, by default.
 ///
@@ -164,6 +235,93 @@ mod tests {
         .unwrap();
         let g = rdfs_closure(&b.build(), &vocab).expect("closure should fit the default bound");
         (store, vocab, g)
+    }
+
+    /// The Turtle-in, Turtle-out surface a caller outside Rust needs.
+    ///
+    /// Exists so a caller can close a graph once and hand the same closure to
+    /// everything that reads it, instead of approximating this one.
+    #[test]
+    fn closure_turtle_entails_through_subclass_and_subproperty() {
+        let out = rdfs_closure_turtle(
+            r#"
+            @prefix ex:   <http://t/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Dog rdfs:subClassOf ex:Animal .
+            ex:rex a ex:Dog .
+            ex:father rdfs:subPropertyOf ex:parent .
+            ex:rex ex:father ex:fido .
+            "#,
+            "http://t/",
+        )
+        .expect("the closure should serialise");
+
+        // rdfs9: an instance of a subclass is an instance of the superclass.
+        assert!(out.contains("Animal"), "missing the entailed type: {out}");
+        // rdfs7: a sub-property use entails the super-property use. This is
+        // the one SHACL itself will not resolve, which is why materialising
+        // exists at all.
+        assert!(out.contains("parent"), "missing the entailed property: {out}");
+    }
+
+    #[test]
+    fn closure_turtle_leaves_out_the_axiomatic_rules() {
+        // The reason a general-purpose RDFS reasoner is the wrong tool for
+        // this: typing every term `rdfs:Resource` is noise no shape acts on,
+        // and it multiplies a small document several times over.
+        let out = rdfs_closure_turtle(
+            "@prefix ex: <http://t/> .
+ex:a ex:p ex:b .
+",
+            "http://t/",
+        )
+        .expect("the closure should serialise");
+        assert!(
+            !out.contains("rdfs:Resource") && !out.contains("2000/01/rdf-schema#Resource"),
+            "the axiomatic rules should not be materialised: {out}"
+        );
+    }
+
+    #[test]
+    fn closure_turtle_round_trips_a_document_with_nothing_to_entail() {
+        let out = rdfs_closure_turtle(
+            "@prefix ex: <http://t/> .
+ex:a ex:p ex:b .
+",
+            "http://t/",
+        )
+        .expect("the closure should serialise");
+        assert!(out.contains("http://t/p") || out.contains("ex:p"), "lost the only triple: {out}");
+    }
+
+    #[test]
+    fn closure_turtle_reports_a_parse_failure_rather_than_panicking() {
+        assert!(rdfs_closure_turtle("this is not turtle {", "http://t/").is_err());
+    }
+
+    /// The case that broke this on the first real ontology it met.
+    ///
+    /// `rdfs3` entails a type for the *object* of a triple, so a property
+    /// with a declared range and a literal value entails a literal-subject
+    /// triple. RDFS says it is entailed; RDF cannot write it down.
+    #[test]
+    fn closure_turtle_drops_entailments_rdf_cannot_express() {
+        let out = rdfs_closure_turtle(
+            r#"
+            @prefix ex:   <http://t/> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:mbox rdfs:range ex:Address .
+            ex:dave ex:mbox "dave@example.com" .
+            "#,
+            "http://t/",
+        )
+        .expect("a literal in the subject position must not fail the call");
+        assert!(
+            !out.contains("\"dave@example.com\" a") && !out.contains("\"dave@example.com\" <"),
+            "a literal-subject triple reached the output: {out}"
+        );
+        // The input itself must survive.
+        assert!(out.contains("dave@example.com"), "lost the original triple: {out}");
     }
 
     /// Asserts a triple is present, naming it readably when it is not.

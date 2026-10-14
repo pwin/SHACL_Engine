@@ -191,3 +191,26 @@ def validate(
     ...
 
 __all__: Sequence[str]
+
+def rdfs_closure(
+    text: str,
+    base: str = "http://example.org/data",
+) -> str:
+    """The RDFS closure of a Turtle document, as Turtle.
+
+    For a caller that reads the same graph more than once — validating it here
+    and querying it with SPARQL elsewhere — and needs both to see the same
+    entailments. Close the graph once with this, give the result to everything
+    that reads it, and validate with `inference="none"`: by then the entailed
+    triples are real ones.
+
+    Computing a second closure in Python is the thing to avoid — two
+    implementations to disagree instead of two graphs.
+
+    The rules are the six that add triples a validator can act on
+    (rdfs2/3/5/7/9/11). The axiomatic rules are left out on purpose: they type
+    every term `rdfs:Resource`, which no shape is improved by.
+
+    Raises `ValueError` if `text` does not parse as Turtle.
+    """
+    ...

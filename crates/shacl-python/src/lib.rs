@@ -617,6 +617,24 @@ fn validate(
     shapes.validate_file(py, data_path, inference, max_results, allow_warnings)
 }
 
+/// The RDFS closure of a Turtle document, as Turtle.
+///
+/// For a caller that reads the same graph more than once -- validating it here
+/// and querying it with SPARQL elsewhere -- and needs both to see the same
+/// entailments. Close the graph once with this, hand the result to everything
+/// that reads it, and validate with `inference="none"`, because by then the
+/// entailed triples are real ones.
+///
+/// Computing the closure separately would be the thing to avoid: two
+/// implementations to disagree instead of two graphs. The rules are the six
+/// that add triples a validator can act on; the axiomatic ones, which would
+/// type every term `rdfs:Resource`, are deliberately left out.
+#[pyfunction]
+#[pyo3(signature = (text, base = "http://example.org/data"))]
+fn rdfs_closure(py: Python<'_>, text: &str, base: &str) -> PyResult<String> {
+    py.detach(|| engine::inference::rdfs_closure_turtle(text, base).map_err(to_py_err))
+}
+
 /// `gil_used = false` declares the module safe for free-threaded CPython.
 /// Without it, importing into a `python3.14t` build makes the interpreter
 /// switch the GIL back on. It is sound here because `Shapes` is immutable and
@@ -628,6 +646,7 @@ fn shacl(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Report>()?;
     m.add_class::<Result>()?;
     m.add_function(wrap_pyfunction!(validate, m)?)?;
+    m.add_function(wrap_pyfunction!(rdfs_closure, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
