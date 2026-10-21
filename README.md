@@ -268,7 +268,7 @@ unzip -q dump.zip -d dump/ && shacl -d dump/*.ttl -s shapes.ttl
 Most of its flags work here, spelled the same way: `-df`/`-sf`, `-o`, `-m`/
 `--metashacl`, `-i`, `-w`/`--allow-warnings`, `--allow-info`, `--abort`. The
 two-letter short options are translated for compatibility — clap has no
-multi-character shorts of its own — so `--df` works too. Two differences worth
+multi-character shorts of its own — so `--df` works too. Three differences worth
 knowing:
 
 - `-f` has no `table`; `human` is the readable format.
@@ -276,6 +276,10 @@ knowing:
   stop breaking conformance. Without it, as in pySHACL and as the SHACL
   specification says, a `sh:Warning` or `sh:Info` result makes `sh:conforms`
   false. See [What conforms means](#what-conforms-means).
+- a shapes graph with no shapes in it is an error here. `-s` is optional in
+  both tools and both fall back to the data graph, but pySHACL 0.40.1 then
+  reports `Conforms: True` and exits 0; this exits 2 unless you pass
+  `--allow-no-shapes`. See [Validating against nothing](#validating-against-nothing).
 
 ## Conformance
 
@@ -799,6 +803,48 @@ if len(shapes) == 0:
 The convenience function is opinionated; the explicit one is not. That line is
 deliberate: the API that hides the compile step is the one that has to speak up
 about it.
+
+### On the command line
+
+The command line hides the compile step too, and until 0.3.4 it said nothing.
+It is the surface where this matters most, because `conforms: true` and exit 0
+are what a CI job branches on: a run that checked nothing passed the gate and
+went on passing it.
+
+`--shapes` is optional, so a forgotten one is not a usage error. The data graph
+becomes its own shapes graph, which is the right default for a self-describing
+document and silently wrong for everything else. Both ways in now fail with
+exit 2 and say which happened:
+
+```console
+$ shacl -d data.ttl
+error: no --shapes was given, so data.ttl was used as its own shapes graph, and
+it declares no shapes. Nothing would be checked and the report would say the
+data conforms. Pass --shapes, or --allow-no-shapes if an empty shapes graph is
+what you meant.
+
+$ shacl -d data.ttl -s empty.ttl
+error: the shapes graph declares no shapes, so nothing would be checked and the
+report would say the data conforms. Check that empty.ttl is the file you meant
+and that the engine recognises what it declares, or pass --allow-no-shapes.
+```
+
+The two messages differ because the searches differ. The first means a flag is
+missing; the second means the file is not what you think it is.
+
+`--allow-no-shapes` restores the old behaviour for the case where checking
+nothing is the point. Reading a graph and reporting whether it parses is one:
+`examples/check.sh` feeds a validation report back through the validator to
+prove the report is readable RDF, and passes the flag to say so.
+
+A self-describing document still works without `--shapes`, because it has
+shapes:
+
+```console
+$ shacl -d examples/self-contained.ttl
+conforms: false
+  DatatypeConstraintComponent | focus ex:bob | value "thirty-four" | path ex:age
+```
 
 ## Licence
 

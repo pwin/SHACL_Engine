@@ -61,9 +61,11 @@ for want in "sh:ValidationReport" "sh:conforms false" "sh:resultSeverity"; do
   check "turtle report contains $want" "present" "$r"
 done
 
-# The report must be a graph another tool can read, so feed it back in.
+# The report must be a graph another tool can read, so feed it back in. There
+# are no shapes to check it against and none are wanted -- parsing it is the
+# whole test -- so this is the case --allow-no-shapes exists for.
 echo "$rdf" > /tmp/shacl-report.$$.ttl
-out=$("$SHACL" -d /tmp/shacl-report.$$.ttl --quiet); rc=$?
+out=$("$SHACL" -d /tmp/shacl-report.$$.ttl --allow-no-shapes --quiet); rc=$?
 rm -f /tmp/shacl-report.$$.ttl
 check "report parses as RDF"          "conforms: true"  "$out"
 
@@ -135,6 +137,34 @@ check "--meta-shacl accepts them"     "conforms: true"  "$out"
 # pySHACL spellings people will already have in their fingers.
 out=$("$SHACL" -d person-valid.ttl --df ttl -s person-shapes.ttl --sf ttl -w --quiet)
 check "pySHACL flag aliases"          "conforms: true"  "$out"
+
+# A shapes graph with no shapes in it conforms, because there is nothing to
+# violate, and that is the worst answer this tool can give: a CI job branches
+# on `conforms: true` and exit 0, so a run that checked nothing passes the
+# gate. Both ways of arriving there are refused unless asked for.
+out=$("$SHACL" -d person-valid.ttl --quiet 2>&1); rc=$?
+check "forgotten -s is refused"       "2"               "$rc"
+case "$out" in
+  *"no --shapes was given"*) r=explains ;;
+  *)                         r="$out" ;;
+esac
+check "...and says why"               "explains"        "$r"
+
+# Shapes given explicitly, but the file declares none. Different cause, so a
+# different message: the file is the one to look at, not the missing flag.
+out=$("$SHACL" -d person-valid.ttl -s person-valid.ttl --quiet 2>&1); rc=$?
+check "empty shapes graph is refused" "2"               "$rc"
+case "$out" in
+  *"declares no shapes"*) r=explains ;;
+  *)                      r="$out" ;;
+esac
+check "...and names the file"          "explains"       "$r"
+
+# Deliberately validating against nothing stays available, which is what the
+# report-parses check above relies on.
+out=$("$SHACL" -d person-valid.ttl --allow-no-shapes --quiet); rc=$?
+check "--allow-no-shapes permits it"  "conforms: true"  "$out"
+check "...and exits 0"                "0"               "$rc"
 
 echo
 if [ "$fails" -eq 0 ]; then

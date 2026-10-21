@@ -65,6 +65,17 @@ struct Args {
     #[arg(long)]
     no_index: bool,
 
+    /// Validate against a shapes graph that declares no shapes, instead of
+    /// refusing to.
+    ///
+    /// Validating against no shapes conforms, because there is nothing to
+    /// violate. Without this flag that is an error rather than a pass: the
+    /// usual cause is a forgotten `--shapes`, and reporting success for a
+    /// graph nothing was checked against is the worst answer a validator can
+    /// give. Pass it when an empty shapes graph is what you meant.
+    #[arg(long)]
+    allow_no_shapes: bool,
+
     /// Worker threads for validation. `0` uses every core; `1` runs
     /// sequentially.
     ///
@@ -894,6 +905,40 @@ fn run() -> Result<bool> {
     let compiled = shacl::shapes::Shapes::compile(shapes_ref, &store, &vocab)
         .context("compiling shapes graph")?;
     let compile_time = t1.elapsed();
+
+    // A shapes graph that declares no shapes conforms, because there is
+    // nothing to violate. That is correct and it is the most dangerous answer
+    // this tool can print: `conforms: true` and exit 0 are what a CI job
+    // branches on, so a run that checked nothing passes the gate and goes on
+    // passing it. The two ways to get here are a forgotten `--shapes`, which
+    // makes the data graph its own shapes graph, and a shapes file that
+    // parsed but declared nothing the engine recognises.
+    //
+    // The Python and JavaScript bindings have refused this since 0.2.0. The
+    // command line did not until 0.3.4, which is the surface where it matters
+    // most.
+    if compiled.is_empty() && !args.allow_no_shapes {
+        if args.shapes.is_empty() {
+            bail!(
+                "no --shapes was given, so {} was used as its own shapes graph, \
+                 and it declares no shapes. Nothing would be checked and the \
+                 report would say the data conforms. Pass --shapes, or \
+                 --allow-no-shapes if an empty shapes graph is what you meant.",
+                describe(&args.data[0])
+            );
+        }
+        bail!(
+            "the shapes graph declares no shapes, so nothing would be checked \
+             and the report would say the data conforms. Check that {} is the \
+             file you meant and that the engine recognises what it declares, \
+             or pass --allow-no-shapes.",
+            shapes_paths
+                .iter()
+                .map(|p| describe(p))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     // SHACL-AF rules infer triples, so they run after the shapes are compiled
     // — the rules are in them — and before anything is validated. Off unless
