@@ -143,8 +143,31 @@ _:r1 a sh:ValidationResult ;
     sh:value "old" .
 ```
 
-The default, `human`, is a one-line-per-result summary for reading rather than
-parsing. Reach for it at a terminal and for anything else use the RDF.
+The default, `human`, is a summary for reading rather than parsing. Each result
+takes a line carrying its severity, and each `sh:message` the shape author wrote
+goes on its own line underneath:
+
+```console
+$ shacl -d data.ttl -s shapes.ttl
+conforms: false
+  Violation DatatypeConstraintComponent | focus <http://ex/bob> | value "x" | path <http://ex/age>
+    Age must be a whole number of years, written as an integer.
+  Warning   MinCountConstraintComponent | focus <http://ex/bob> | value - | path <http://ex/nick>
+    A nickname is helpful but not required.
+```
+
+Both of those fields arrived in 0.3.5. Until then this format printed the
+constraint component and dropped the sentence explaining it, so custom wording
+reached the RDF report and never the screen — and because a warning breaks
+conformance by default since 0.3.0, `conforms: false` could not be traced to
+the result responsible for it. Several messages on one result each get a line,
+with the language tag kept where there is one to tell them apart.
+
+Placeholders are substituted before display, so a `sh:message` of
+`"{$this} has a non-numeric age of {?value}"` on a SPARQL constraint arrives
+with the values filled in.
+
+Reach for `human` at a terminal and for anything else use the RDF.
 
 The RDF output is **reproducible**: the same inputs give the same bytes, so two
 reports can be diffed and only real differences show up. That needs the triples
@@ -843,7 +866,7 @@ shapes:
 ```console
 $ shacl -d examples/self-contained.ttl
 conforms: false
-  DatatypeConstraintComponent | focus ex:bob | value "thirty-four" | path ex:age
+  Violation DatatypeConstraintComponent | focus ex:bob | value "thirty-four" | path ex:age
 ```
 
 ## Licence

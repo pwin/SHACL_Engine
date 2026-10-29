@@ -138,6 +138,38 @@ check "--meta-shacl accepts them"     "conforms: true"  "$out"
 out=$("$SHACL" -d person-valid.ttl --df ttl -s person-shapes.ttl --sf ttl -w --quiet)
 check "pySHACL flag aliases"          "conforms: true"  "$out"
 
+# The readable format carries the severity and every sh:message. Both were in
+# the RDF report from the start and only this format dropped them, which is the
+# default and the one a person reads -- so a shape author's own wording never
+# reached the screen.
+cat > /tmp/shacl-msg.$$.ttl <<'TTL'
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:S a sh:NodeShape ;
+  sh:targetClass ex:Person ;
+  sh:property [ sh:path ex:age ; sh:datatype xsd:integer ;
+                sh:message "Age must be an integer." ] ;
+  sh:property [ sh:path ex:nick ; sh:minCount 1 ; sh:severity sh:Warning ;
+                sh:message "A nickname is optional." ] .
+TTL
+cat > /tmp/shacl-msgdata.$$.ttl <<'TTL'
+@prefix ex: <http://example.org/ns#> .
+ex:bob a ex:Person ; ex:age "x" .
+TTL
+out=$("$SHACL" -d /tmp/shacl-msgdata.$$.ttl -s /tmp/shacl-msg.$$.ttl)
+case "$out" in *"Age must be an integer."*) r=shown ;; *) r=missing ;; esac
+check "human output shows sh:message"  "shown"           "$r"
+case "$out" in *"A nickname is optional."*) r=shown ;; *) r=missing ;; esac
+check "...every message, not just one" "shown"           "$r"
+# Since 0.3.0 a warning breaks conformance, so which result is to blame cannot
+# be read off the output unless the severity is on it.
+case "$out" in *Warning*) r=shown ;; *) r=missing ;; esac
+check "human output shows severity"    "shown"           "$r"
+case "$out" in *Violation*) r=shown ;; *) r=missing ;; esac
+check "...for violations too"          "shown"           "$r"
+rm -f /tmp/shacl-msg.$$.ttl /tmp/shacl-msgdata.$$.ttl
+
 # A shapes graph with no shapes in it conforms, because there is nothing to
 # violate, and that is the worst answer this tool can give: a CI job branches
 # on `conforms: true` and exit 0, so a run that checked nothing passes the

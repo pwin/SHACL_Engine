@@ -230,7 +230,8 @@ impl Severity {
 
 #[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
 enum Format {
-    /// One line per result, for reading rather than parsing.
+    /// A line per result with its severity, each `sh:message` under it.
+    /// For reading rather than parsing.
     Human,
     // Aliases because clap derives `n-triples` from the variant name, and
     // nobody types that.
@@ -1046,21 +1047,53 @@ fn run() -> Result<bool> {
     } else {
         let mut out = format!("conforms: {conforms}\n");
         if !args.quiet {
+            // The severity and the message are the two fields a reader needs
+            // most, and were the two this format dropped. `sh:message` is a
+            // sentence a shape author wrote in order to be read, so naming the
+            // constraint component while withholding the explanation of it was
+            // the wrong way round. And since 0.3.0 a warning breaks conformance
+            // by default, so "which of these is why it failed" could not be
+            // answered from this output at all.
+            //
+            // Both were in the RDF report the whole time. Only `human` lost
+            // them, which is the default and the one a person reads.
+            let local = |id: shacl::TermId| {
+                store
+                    .iri(id)
+                    .and_then(|i| i.rsplit_once('#').map(|(_, l)| l.to_string()))
+                    .unwrap_or_default()
+            };
             for r in &report.results {
                 let show = |t: Option<shacl::TermId>| {
                     t.map(|t| store.to_oxrdf(t).to_string())
                         .unwrap_or_else(|| "-".into())
                 };
+                // Left-aligned in the width of `Violation`, the longest of the
+                // three severities that break conformance, so the components
+                // line up to be read down the column.
                 out.push_str(&format!(
-                    "  {} | focus {} | value {} | path {}\n",
-                    store
-                        .iri(r.source_constraint_component)
-                        .and_then(|i| i.rsplit_once('#').map(|(_, l)| l.to_string()))
-                        .unwrap_or_default(),
+                    "  {:<9} {} | focus {} | value {} | path {}\n",
+                    local(r.severity),
+                    local(r.source_constraint_component),
                     show(Some(r.focus_node)),
                     show(r.value),
                     show(r.path),
                 ));
+                // A message goes on its own line underneath rather than at the
+                // end of that one: written-out IRIs already carry it to about
+                // eighty columns, and an appended sentence would start past the
+                // wrap, which is where text goes to be missed.
+                //
+                // SHACL allows more than one `sh:message`, including one per
+                // language, so each gets a line and a language tag is kept when
+                // there is one to tell them apart.
+                for &m in &r.messages {
+                    let text = store.lexical_form(m).unwrap_or_default();
+                    match store.language(m) {
+                        Some(lang) => out.push_str(&format!("    {text} [{lang}]\n")),
+                        None => out.push_str(&format!("    {text}\n")),
+                    }
+                }
             }
         }
         out
