@@ -66,7 +66,14 @@ impl Float {
     #[inline]
     #[must_use]
     pub fn round(self) -> Self {
-        self.value.round().into()
+        let mut result = self.value.round();
+        if self.value.fract() == -0.5 {
+            result += 1.;
+        }
+        if result == 0. && self.value.is_sign_negative() {
+            result = -0.;
+        }
+        result.into()
     }
 
     #[inline]
@@ -155,7 +162,7 @@ impl From<Boolean> for Float {
 
 impl From<Integer> for Float {
     #[inline]
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(clippy::cast_precision_loss)]
     fn from(value: Integer) -> Self {
         (i64::from(value) as f32).into()
     }
@@ -163,7 +170,7 @@ impl From<Integer> for Float {
 
 impl From<Double> for Float {
     #[inline]
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(clippy::cast_possible_truncation)]
     fn from(value: Double) -> Self {
         Self {
             value: f64::from(value) as f32,
@@ -246,7 +253,7 @@ impl Div for Float {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic_in_result_fn)]
+#[expect(clippy::panic_in_result_fn)]
 mod tests {
     use super::*;
 
@@ -284,6 +291,26 @@ mod tests {
         assert!(Float::from(0.).is_identical_with(Float::from(0.)));
         assert!(Float::NAN.is_identical_with(Float::NAN));
         assert!(!Float::from(-0.).is_identical_with(Float::from(0.)));
+    }
+
+    #[test]
+    fn round() {
+        assert_eq!(Float::from(2.5).round(), Float::from(3.));
+        assert_eq!(Float::from(2.499_999).round(), Float::from(2.));
+        assert_eq!(Float::from(-2.5).round(), Float::from(-2.));
+        assert_eq!(Float::from(-1.5).round(), Float::from(-1.));
+        assert!(
+            Float::from(-0.5)
+                .round()
+                .is_identical_with(Float::from(-0.))
+        );
+        assert!(
+            Float::from(-0.1)
+                .round()
+                .is_identical_with(Float::from(-0.))
+        );
+        assert!(Float::from(-0.).round().is_identical_with(Float::from(-0.)));
+        assert!(Float::from(0.).round().is_identical_with(Float::from(0.)));
     }
 
     #[test]

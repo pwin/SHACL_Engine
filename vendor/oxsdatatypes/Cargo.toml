@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-rust-version = "1.75"
+edition = "2024"
+rust-version = "1.87"
 name = "oxsdatatypes"
-version = "0.2.2"
+version = "0.2.4"
 authors = ["Tpt <thomas@pellissier-tanon.fr>"]
 build = false
 autolib = false
@@ -21,9 +21,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = """
-An implementation of some XSD datatypes for SPARQL implementations
-"""
+description = "Some XSD datatypes for SPARQL implementations"
 documentation = "https://docs.rs/oxsdatatypes"
 readme = "README.md"
 keywords = ["XSD"]
@@ -37,6 +35,10 @@ rustdoc-args = [
     "docsrs",
 ]
 
+[features]
+custom-now = []
+js = ["js-sys"]
+
 [lib]
 name = "oxsdatatypes"
 path = "src/lib.rs"
@@ -44,12 +46,8 @@ path = "src/lib.rs"
 [dependencies.thiserror]
 version = ">=1.0.50, <3.0"
 
-[features]
-custom-now = []
-js = ["js-sys"]
-
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies.js-sys]
-version = "0.3.60"
+version = "0.3.85"
 optional = true
 
 [lints.rust]

@@ -529,6 +529,16 @@ truncated where it did not fail: `2 / 3` was `0.666666666666666666` and is now
 `0.666666666666666667`. The arithmetic is Oxigraph's `oxsdatatypes` with that
 one change, kept in [vendor/oxsdatatypes](vendor/oxsdatatypes/PROVENANCE.md).
 
+0.3.6 also moves to the Oxigraph crates that copy needs (`spargebra` 0.4.8,
+`spareval` 0.2.9), which parse three things as written that 0.3.5 did not. A
+chain of `-` or `/` groups from the left: `10 - 2 - 3` is 5, where it was 11.
+A signed literal after an operand no longer takes the operator before it:
+`1 -2*3 -4` is -9, where it was -1. And a filter in a group nested inside
+`OPTIONAL`, as in `OPTIONAL { { ... FILTER(...) } }`, stays in that group,
+where it cannot see the variables bound outside; it used to become the
+`OPTIONAL`'s own condition. A constraint built on any of them could fire on the
+wrong nodes or report the wrong value.
+
 ## SHACL-AF rules
 
 Rules infer triples before validation, so a report can depend on data that was

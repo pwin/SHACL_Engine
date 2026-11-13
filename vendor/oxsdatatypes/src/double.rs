@@ -66,7 +66,14 @@ impl Double {
     #[inline]
     #[must_use]
     pub fn round(self) -> Self {
-        self.value.round().into()
+        let mut result = self.value.round();
+        if self.value.fract() == -0.5 {
+            result += 1.;
+        }
+        if result == 0. && self.value.is_sign_negative() {
+            result = -0.;
+        }
+        result.into()
     }
 
     #[inline]
@@ -175,7 +182,7 @@ impl From<Boolean> for Double {
 
 impl From<Integer> for Double {
     #[inline]
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(clippy::cast_precision_loss)]
     fn from(value: Integer) -> Self {
         (i64::from(value) as f64).into()
     }
@@ -256,7 +263,7 @@ impl Div for Double {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic_in_result_fn)]
+#[expect(clippy::panic_in_result_fn)]
 mod tests {
     use super::*;
 
@@ -297,6 +304,30 @@ mod tests {
     }
 
     #[test]
+    fn round() {
+        assert_eq!(Double::from(2.5).round(), Double::from(3.));
+        assert_eq!(Double::from(2.499_999).round(), Double::from(2.));
+        assert_eq!(Double::from(-2.5).round(), Double::from(-2.));
+        assert_eq!(Double::from(-1.5).round(), Double::from(-1.));
+        assert!(
+            Double::from(-0.5)
+                .round()
+                .is_identical_with(Double::from(-0.))
+        );
+        assert!(
+            Double::from(-0.1)
+                .round()
+                .is_identical_with(Double::from(-0.))
+        );
+        assert!(
+            Double::from(-0.)
+                .round()
+                .is_identical_with(Double::from(-0.))
+        );
+        assert!(Double::from(0.).round().is_identical_with(Double::from(0.)));
+    }
+
+    #[test]
     fn from_str() -> Result<(), ParseFloatError> {
         assert_eq!(Double::from_str("NaN")?.to_string(), "NaN");
         assert_eq!(Double::from_str("INF")?.to_string(), "INF");
@@ -312,14 +343,8 @@ mod tests {
         assert_eq!(Double::from_str("-1")?.to_string(), "-1");
         assert_eq!(Double::from_str("1.")?.to_string(), "1");
         assert_eq!(Double::from_str("-1.")?.to_string(), "-1");
-        assert_eq!(
-            Double::from_str(&f64::MIN.to_string()).unwrap(),
-            Double::MIN
-        );
-        assert_eq!(
-            Double::from_str(&f64::MAX.to_string()).unwrap(),
-            Double::MAX
-        );
+        assert_eq!(Double::from_str(&f64::MIN.to_string())?, Double::MIN);
+        assert_eq!(Double::from_str(&f64::MAX.to_string())?, Double::MAX);
         Ok(())
     }
 }

@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -29,7 +29,7 @@ regex = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 
-# oxsdatatypes 0.2.2 with decimal multiplication and division that round to 18 fractional
+# oxsdatatypes 0.2.4 with decimal multiplication and division that round to 18 fractional
 # digits instead of failing. Upstream refuses any product it cannot hold exactly, so
 # `1.3 * 31.583333333333333333` was an error, the variable it was bound to stayed unbound,
 # and a message that named it printed `{?ratio}` as written. spareval and every crate here
