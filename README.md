@@ -515,6 +515,20 @@ per-source answers today.
 `GRAPH` patterns inside a `sh:sparql` constraint are a separate matter: the
 shapes graph is exposed as `$shapesGraph`, and the data is the default graph.
 
+### Decimal arithmetic rounds
+
+An `xs:decimal` is held to 18 fractional digits. A product or quotient that
+needs more, in a SPARQL constraint, target or rule, is rounded to 18 digits,
+half to even: `1.3 * 31.583333333333333333` is `41.058333333333333333`. Only
+division by zero and a result beyond about ±1.7 × 10²⁰ are errors. XPath F&O
+§4.2 leaves the choice between truncating and rounding to the implementation.
+
+Before 0.3.6 such a product was an error, and an error leaves its variable
+unbound, so a message naming it printed `{?ratio}` as written. Division also
+truncated where it did not fail: `2 / 3` was `0.666666666666666666` and is now
+`0.666666666666666667`. The arithmetic is Oxigraph's `oxsdatatypes` with that
+one change, kept in [vendor/oxsdatatypes](vendor/oxsdatatypes/PROVENANCE.md).
+
 ## SHACL-AF rules
 
 Rules infer triples before validation, so a report can depend on data that was
@@ -878,6 +892,11 @@ This is the Rust ecosystem's convention, and it exists to solve one problem:
 Apache 2.0 carries an express patent grant that MIT lacks, but is incompatible
 with GPLv2, which MIT is not. Offering both lets a GPLv2 project take the MIT
 terms and a patent-cautious one take Apache, excluding neither.
+
+`vendor/oxsdatatypes` is a copy of the Oxigraph project's crate of that name
+with one change, described in its [PROVENANCE.md](vendor/oxsdatatypes/PROVENANCE.md).
+Copyright in it remains with the Oxigraph developers, under the same two
+licences, which are kept beside it.
 
 The W3C test suites bundled under `testsuite/` are not covered by that; they
 are published by the W3C under their own licence — see

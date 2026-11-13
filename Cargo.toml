@@ -5,6 +5,7 @@ members = [
     "crates/shacl-cli",
     "crates/shacl-python",
     "crates/shacl-wasm",
+    "vendor/oxsdatatypes",
 ]
 
 [workspace.package]
@@ -27,6 +28,14 @@ hashbrown = "0.16"
 regex = "1"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+
+# oxsdatatypes 0.2.2 with decimal multiplication and division that round to 18 fractional
+# digits instead of failing. Upstream refuses any product it cannot hold exactly, so
+# `1.3 * 31.583333333333333333` was an error, the variable it was bound to stayed unbound,
+# and a message that named it printed `{?ratio}` as written. spareval and every crate here
+# resolve it through this patch: see vendor/oxsdatatypes/PROVENANCE.md.
+[patch.crates-io]
+oxsdatatypes = { path = "vendor/oxsdatatypes" }
 
 # Optimised profile for the benchmark / release binaries: SHACL validation is
 # dominated by index probing, so LTO + a single codegen unit pay off well.
