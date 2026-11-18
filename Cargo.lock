@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "shacl"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-cli"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "clap",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-python"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "pyo3",
  "shacl",
@@ -1039,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "shacl-wasm"
-version = "0.3.7"
+version = "0.3.8"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",
@@ -1085,8 +1085,6 @@ dependencies = [
 [[package]]
 name = "spareval"
 version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "072b1b44c9003e54a7b0817b65ce156d94ab46250dcefe0f24a9b3cc4020c1c6"
 dependencies = [
  "hex",
  "json-event-parser",

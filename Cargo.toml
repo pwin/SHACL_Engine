@@ -7,9 +7,12 @@ members = [
     "crates/shacl-wasm",
     "vendor/oxsdatatypes",
 ]
+# Upstream code, built as a dependency only, so neither clippy nor rustfmt restyles it; its own
+# tests run in HOLOS's workspace, where the same copy is a member. See vendor/spareval/PROVENANCE.md.
+exclude = ["vendor/spareval"]
 
 [workspace.package]
-version = "0.3.7"
+version = "0.3.8"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -36,6 +39,11 @@ clap = { version = "4", features = ["derive"] }
 # resolve it through this patch: see vendor/oxsdatatypes/PROVENANCE.md.
 [patch.crates-io]
 oxsdatatypes = { path = "vendor/oxsdatatypes" }
+# spareval 0.2.9 with `+` accepting a duration on either side of a date, time or dateTime,
+# as XPath's operator mapping does. Upstream takes only the temporal value first, and
+# sparopt reorders the operands of every `+` by hash, so a dateTime plus a duration came
+# out unbound for some values: see vendor/spareval/PROVENANCE.md.
+spareval = { path = "vendor/spareval" }
 
 # Optimised profile for the benchmark / release binaries: SHACL validation is
 # dominated by index probing, so LTO + a single codegen unit pay off well.

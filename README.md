@@ -557,6 +557,14 @@ because the engine makes those itself rather than through the SPARQL evaluator.
 The change is a feature of Oxigraph's `spareval`, `sep-0002`, which 0.3.7 turns
 on; HOLOS 0.26.3 does the same.
 
+A duration also adds to a date, time or dateTime, with the duration on either
+side (`?issued + "P2Y"^^xsd:yearMonthDuration`), from 0.3.8. In 0.3.7 the sum
+was unbound for some values and not others, so a constraint built on one could
+stay silent: the evaluator took the duration only after the date, and the query
+optimizer orders the operands of `+` by hash. The copy of `spareval` in
+[vendor/spareval](vendor/spareval/PROVENANCE.md) accepts both orders, as XPath
+does.
+
 ## SHACL-AF rules
 
 Rules infer triples before validation, so a report can depend on data that was
