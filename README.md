@@ -539,6 +539,24 @@ where it cannot see the variables bound outside; it used to become the
 `OPTIONAL`'s own condition. A constraint built on any of them could fire on the
 wrong nodes or report the wrong value.
 
+### Dates, times and durations compare
+
+In a SPARQL constraint, target or rule, `xsd:date`, `xsd:time` and the three
+duration types have values: they compare (`?until < "2026-11-10"^^xsd:date`),
+sort, and subtract (`?until - ?issued` is an `xsd:dayTimeDuration`), following
+XPath's operators as SEP-0002, the SPARQL 1.2 community proposal, sets them out.
+`ADJUST` moves a date or time into a timezone. The Gregorian types
+(`xsd:gYear` and its kin) still have no order, as in XPath: cast them through
+`STR()` to compare.
+
+Before 0.3.7 a comparison between two dates was a type error, the `FILTER`
+dropped the row, and the constraint reported nothing: an expired certificate
+passed validation without a word. Only `xsd:dateTime` compared. The Core
+comparisons (`sh:lessThan`, `sh:minInclusive` and the rest) were never affected,
+because the engine makes those itself rather than through the SPARQL evaluator.
+The change is a feature of Oxigraph's `spareval`, `sep-0002`, which 0.3.7 turns
+on; HOLOS 0.26.3 does the same.
+
 ## SHACL-AF rules
 
 Rules infer triples before validation, so a report can depend on data that was

@@ -32,8 +32,15 @@ oxrdf.workspace = true
 oxrdfio.workspace = true
 oxttl = "0.2"
 oxsdatatypes.workspace = true
-spargebra.workspace = true
-spareval.workspace = true
+# `sep-0002` gives xsd:date, xsd:time and the duration types values in SHACL-SPARQL, so that
+# `FILTER(?until < "2026-11-10"^^xsd:date)` compares rather than erroring. Without it the
+# comparison is a type error, the FILTER drops the row, and a constraint that should fire
+# reports nothing. Always on, unlike `rdf-12`: no build wants dates opaque. (The Core
+# comparisons, `sh:lessThan` and the range components, never used the evaluator and were not
+# affected.) Oxigraph's `calendar-ext`, which also orders xsd:gYear and its kin, is
+# deliberately not enabled: XPath defines no order for those types.
+spargebra = { workspace = true, features = ["sep-0002"] }
+spareval = { workspace = true, features = ["sep-0002"] }
 rayon = { workspace = true, optional = true }
 hashbrown.workspace = true
 regex.workspace = true
