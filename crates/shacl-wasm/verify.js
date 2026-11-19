@@ -40,7 +40,13 @@ console.log('\n== 1. basic sanity: minCount violation ==');
   check('focus node is ex:bob', res[0].focusNode, 'http://example.org/bob');
   check('path is ex:name', res[0].path, 'http://example.org/name');
   check('severity honours sh:Warning on the property shape', res[0].severity, 'http://www.w3.org/ns/shacl#Warning');
-  check('conforms (no Violation-severity results)', r.conforms, true);
+  // A Warning blocks conformance, as the specification defines when a report
+  // declares no sh:conformanceDisallows. Until 0.3.2 only Violations did,
+  // which is pySHACL's --allow-warnings reading; that reading is still there
+  // to be had from the results' severities.
+  check('does not conform: a Warning blocks conformance', r.conforms, false);
+  check('no Violation-severity results (the --allow-warnings reading)',
+    res.every((x) => x.severity !== 'http://www.w3.org/ns/shacl#Violation'), true);
 }
 
 // ------------------------------------- the two shapes that crash shacl-engine
