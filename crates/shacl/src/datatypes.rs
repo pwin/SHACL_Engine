@@ -7,7 +7,10 @@
 
 use std::cmp::Ordering;
 
-use oxsdatatypes::{Date, DateTime, Decimal, Double, Duration, Time};
+use oxsdatatypes::{
+    Date, DateTime, DayTimeDuration, Decimal, Double, Duration, GDay, GMonth, GMonthDay, GYear,
+    GYearMonth, Time, YearMonthDuration,
+};
 
 use crate::model::{TermId, TermStore, Vocab};
 
@@ -238,8 +241,67 @@ pub fn is_well_formed(lex: &str, dt: TermId, vocab: &Vocab) -> bool {
     if dt == vocab.xsd_duration {
         return lex.parse::<Duration>().is_ok();
     }
+    // The two duration subtypes are not covered by `xsd:duration` above. Each
+    // is a restriction of its value space rather than only of its lexical one,
+    // so `"P1Y"^^xsd:dayTimeDuration` parses as a duration and still is not one
+    // of these: a year is not a day-time component. Parsing as the subtype is
+    // what catches that; parsing as `Duration` would not.
+    if dt == vocab.xsd_dayTimeDuration {
+        return lex.parse::<DayTimeDuration>().is_ok();
+    }
+    if dt == vocab.xsd_yearMonthDuration {
+        return lex.parse::<YearMonthDuration>().is_ok();
+    }
+    // The gregorian types. Their lexical forms are specific and easy to get
+    // wrong by hand -- `gYearMonth` is `1066-10`, `gMonth` is `--10`, `gDay` is
+    // `---14` -- which is the reason to check them rather than hope.
+    if dt == vocab.xsd_gYear {
+        return lex.parse::<GYear>().is_ok();
+    }
+    if dt == vocab.xsd_gYearMonth {
+        return lex.parse::<GYearMonth>().is_ok();
+    }
+    if dt == vocab.xsd_gMonth {
+        return lex.parse::<GMonth>().is_ok();
+    }
+    if dt == vocab.xsd_gDay {
+        return lex.parse::<GDay>().is_ok();
+    }
+    if dt == vocab.xsd_gMonthDay {
+        return is_well_formed_g_month_day(lex);
+    }
     // An unknown datatype places no constraint on its lexical space.
+    //
+    // That default is right for a datatype this engine has never heard of, and
+    // it was wrong for the seven above, which it had the parsers for all along:
+    // `oxsdatatypes` is already a dependency and implements every one. Until
+    // 0.3.9 a malformed `xsd:gYear` satisfied `sh:datatype`, so validation
+    // passed data it was asked to reject. Reported from work on tarka.
     true
+}
+
+/// `xsd:gMonthDay`, the leap day included.
+///
+/// `oxsdatatypes` rejects `--02-29`: with no year to go on it measures February
+/// at 28 days. XSD 1.1 requires the opposite. gMonthDay has no year in its value
+/// space, so S3.3.12.1 caps February at 29 -- "The day value must be no more
+/// than 30 if month is one of 4, 6, 9, or 11, and no more than 29 if month is
+/// 2" -- and S3.3.12 says as much in passing: "days beyond 28 cannot occur in
+/// all Februaries; 29 is nonetheless permitted". The 28-or-29 leap-year split
+/// belongs to `xsd:date`, which has a year to apply it to.
+///
+/// The parse is therefore retried with the single day the library miscounts
+/// swapped for the one before it. Everything else about the form is still
+/// checked by the library, the timezone included; only February's upper bound
+/// comes from the specification rather than from the dependency.
+fn is_well_formed_g_month_day(lex: &str) -> bool {
+    if lex.parse::<GMonthDay>().is_ok() {
+        return true;
+    }
+    match lex.strip_prefix("--02-29") {
+        Some(timezone) => format!("--02-28{timezone}").parse::<GMonthDay>().is_ok(),
+        None => false,
+    }
 }
 
 fn is_well_formed_integer(lex: &str, dt: TermId, v: &Vocab) -> bool {
@@ -322,6 +384,119 @@ mod tests {
             let y = self.lit(b.0, b.1);
             compare(x, y, &self.store, &self.vocab)
         }
+        fn wf(&mut self, lex: &str, dt: &str) -> bool {
+            let t = self.lit(lex, dt);
+            is_well_formed(lex, self.store.datatype(t).unwrap(), &self.vocab)
+        }
+    }
+
+    /// Each of these seven was accepted whatever its lexical form until 0.3.9,
+    /// because `is_well_formed` had no branch for it and fell through to "an
+    /// unknown datatype places no constraint". They are not unknown: every one
+    /// has a parser in `oxsdatatypes`, which this crate already depends on.
+    ///
+    /// The good and bad cases are paired on purpose. A checker that rejects
+    /// everything passes a test that only feeds it malformed input, and would
+    /// be worse than the gap it replaced.
+    #[test]
+    fn checks_the_gregorian_types() {
+        let mut f = F::new();
+
+        assert!(f.wf("1066", "gYear"));
+        assert!(f.wf("-0044", "gYear"));
+        assert!(f.wf("1066Z", "gYear"));
+        assert!(f.wf("1066+01:00", "gYear"));
+        assert!(!f.wf("not-a-year", "gYear"));
+        assert!(!f.wf("66", "gYear"), "a year takes at least four digits");
+        assert!(!f.wf("1066-10", "gYear"), "that is a gYearMonth");
+
+        assert!(f.wf("1066-10", "gYearMonth"));
+        assert!(f.wf("-0044-03", "gYearMonth"));
+        assert!(!f.wf("1066", "gYearMonth"));
+        assert!(!f.wf("1066-13", "gYearMonth"), "there is no month 13");
+
+        assert!(f.wf("--10", "gMonth"));
+        assert!(f.wf("--02Z", "gMonth"));
+        assert!(!f.wf("10", "gMonth"), "gMonth is written --MM");
+        assert!(!f.wf("--13", "gMonth"));
+
+        assert!(f.wf("---14", "gDay"));
+        assert!(f.wf("---31", "gDay"), "no month, so 31 is always allowed");
+        assert!(!f.wf("14", "gDay"), "gDay is written ---DD");
+        assert!(!f.wf("---32", "gDay"));
+
+        assert!(f.wf("--10-14", "gMonthDay"));
+        assert!(!f.wf("February", "gMonthDay"));
+        assert!(!f.wf("--04-31", "gMonthDay"), "April has thirty days");
+    }
+
+    /// `--02-29` is a valid `xsd:gMonthDay` and `oxsdatatypes` rejects it,
+    /// having measured February at 28 days with no year to go on. XSD 1.1
+    /// S3.3.12.1 caps February at 29 for this type precisely because the year
+    /// is absent, and S3.3.12 spells it out: "days beyond 28 cannot occur in
+    /// all Februaries; 29 is nonetheless permitted".
+    ///
+    /// Pinned separately from the rest because the compensation for it is ours
+    /// rather than the library's, so a future version of the dependency fixing
+    /// this must not quietly change the answer, and the surrounding bounds must
+    /// stay the library's.
+    #[test]
+    fn allows_the_leap_day_as_a_g_month_day() {
+        let mut f = F::new();
+        assert!(f.wf("--02-29", "gMonthDay"));
+        assert!(f.wf("--02-29Z", "gMonthDay"));
+        assert!(f.wf("--02-29+01:00", "gMonthDay"));
+        assert!(f.wf("--02-28", "gMonthDay"));
+        // The exception is one day wide, and does not loosen anything round it.
+        assert!(!f.wf("--02-30", "gMonthDay"));
+        assert!(!f.wf("--02-29!", "gMonthDay"));
+        assert!(!f.wf("--02-29+99:00", "gMonthDay"));
+    }
+
+    /// Both duration subtypes restrict the *value* space, not only the lexical
+    /// one, so `"P1Y"` parses perfectly as a duration and is still not a
+    /// dayTimeDuration. Checking them against `Duration` would have let both
+    /// through, which is why each parses as its own type.
+    #[test]
+    fn checks_the_duration_subtypes() {
+        let mut f = F::new();
+
+        assert!(f.wf("P1DT2H", "dayTimeDuration"));
+        assert!(f.wf("PT1H", "dayTimeDuration"));
+        assert!(f.wf("-P1DT2H3M4S", "dayTimeDuration"));
+        assert!(!f.wf("P1Y", "dayTimeDuration"), "a year is not day-time");
+        assert!(!f.wf("P1M", "dayTimeDuration"), "nor is a month");
+        assert!(!f.wf("one hour", "dayTimeDuration"));
+
+        assert!(f.wf("P1Y2M", "yearMonthDuration"));
+        assert!(f.wf("P1Y", "yearMonthDuration"));
+        assert!(f.wf("-P2Y6M", "yearMonthDuration"));
+        assert!(
+            !f.wf("PT1H", "yearMonthDuration"),
+            "an hour is not year-month"
+        );
+        assert!(!f.wf("P1D", "yearMonthDuration"), "nor is a day");
+
+        // `xsd:duration` itself still takes either, as it always did.
+        assert!(f.wf("P1Y", "duration"));
+        assert!(f.wf("PT1H", "duration"));
+        assert!(!f.wf("P", "duration"));
+    }
+
+    /// The fall-through is still the right answer for a datatype the engine
+    /// genuinely does not know: SHACL asks whether the literal is ill-formed,
+    /// and about someone's own datatype this engine has no opinion.
+    #[test]
+    fn an_unknown_datatype_still_constrains_nothing() {
+        let mut f = F::new();
+        let t = f
+            .store
+            .literal("whatever", "http://example.org/ns#Custom", None);
+        assert!(is_well_formed(
+            "whatever",
+            f.store.datatype(t).unwrap(),
+            &f.vocab
+        ));
     }
 
     #[test]

@@ -198,6 +198,51 @@ out=$("$SHACL" -d person-valid.ttl --allow-no-shapes --quiet); rc=$?
 check "--allow-no-shapes permits it"  "conforms: true"  "$out"
 check "...and exits 0"                "0"               "$rc"
 
+# sh:datatype has to reject a malformed literal, and until 0.3.9 seven datatypes
+# were never checked at all: the well-formedness test had no branch for them and
+# fell through to "an unknown datatype places no constraint". They were not
+# unknown. Reported from work on tarka.
+cat > /tmp/shacl-dt.$$.ttl <<'TTL'
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix ex: <http://example.org/ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:S a sh:NodeShape ; sh:targetClass ex:Rec ;
+  sh:property [ sh:path ex:year ; sh:datatype xsd:gYear ] ;
+  sh:property [ sh:path ex:md   ; sh:datatype xsd:gMonthDay ] ;
+  sh:property [ sh:path ex:dtd  ; sh:datatype xsd:dayTimeDuration ] .
+TTL
+cat > /tmp/shacl-dtbad.$$.ttl <<'TTL'
+@prefix ex: <http://example.org/ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:x a ex:Rec ; ex:year "not-a-year"^^xsd:gYear .
+TTL
+out=$("$SHACL" -d /tmp/shacl-dtbad.$$.ttl -s /tmp/shacl-dt.$$.ttl --quiet)
+check "a malformed gYear is caught"    "conforms: false" "$out"
+
+# "P1Y" is a well-formed duration and still not a dayTimeDuration: the subtype
+# restricts the value space, so checking it as xsd:duration would pass it.
+cat > /tmp/shacl-dtbad.$$.ttl <<'TTL'
+@prefix ex: <http://example.org/ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:x a ex:Rec ; ex:dtd "P1Y"^^xsd:dayTimeDuration .
+TTL
+out=$("$SHACL" -d /tmp/shacl-dtbad.$$.ttl -s /tmp/shacl-dt.$$.ttl --quiet)
+check "a year is not a dayTimeDuration" "conforms: false" "$out"
+
+# The other direction matters more: a checker that rejects everything would pass
+# the two checks above. --02-29 is a valid gMonthDay -- February is capped at 29
+# for a type with no year in it -- and oxsdatatypes rejects it, so this is the
+# one bound taken from the specification rather than the library.
+cat > /tmp/shacl-dtgood.$$.ttl <<'TTL'
+@prefix ex: <http://example.org/ns#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:x a ex:Rec ; ex:year "1066Z"^^xsd:gYear ;
+  ex:md "--02-29"^^xsd:gMonthDay ; ex:dtd "P1DT2H"^^xsd:dayTimeDuration .
+TTL
+out=$("$SHACL" -d /tmp/shacl-dtgood.$$.ttl -s /tmp/shacl-dt.$$.ttl --quiet)
+check "well-formed values still pass"  "conforms: true"  "$out"
+rm -f /tmp/shacl-dt.$$.ttl /tmp/shacl-dtbad.$$.ttl /tmp/shacl-dtgood.$$.ttl
+
 echo
 if [ "$fails" -eq 0 ]; then
   echo "all checks passed"
