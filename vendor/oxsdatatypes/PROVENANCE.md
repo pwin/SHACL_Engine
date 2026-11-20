@@ -17,13 +17,28 @@ here were taken from the root of the Oxigraph repository. `Cargo.toml` is the no
 manifest cargo publishes; `Cargo.toml.orig` is the one it was normalised from and is not
 read by cargo.
 
-The manifest has two changes. Its `[lints.clippy]` table is removed. That table is
+The manifest has three changes. Its `[lints.clippy]` table is removed. That table is
 Oxigraph's workspace lint policy, about 200 lints set to warn, written for the clippy of its
 day. Under a newer clippy with `-D warnings` it fails on upstream's own tests (`unwrap` in a
 test that returns `Result`) and names lints that have since been renamed or removed. Without
 it the crate gets clippy's defaults, as the code around it does. `[lints.rust]` is kept. And
 its `resolver = "2"` line is removed: cargo ignores a resolver set by a package that is not
 the workspace root, and says so on every command, because this workspace uses resolver 3.
+
+And the `custom-now` feature is removed from `[features]`. It exists upstream so that a host
+without a clock -- zkvm, no-std -- can supply the time itself: turning it on makes the crate
+declare `unsafe extern "Rust" fn custom_ox_now()` and leaves the embedder to define it.
+Nothing in this workspace is such a host, and nothing should define that symbol. Because this
+copy is a workspace *member* rather than only a patch, `cargo test --workspace --all-features`
+turned the feature on and the build then failed at the linker with `unresolved external symbol
+custom_ox_now` -- which reads as a broken toolchain and is a feature nobody asked for. The
+`cfg` blocks that test for it are left in place, so the source still differs from upstream in
+`decimal.rs` alone; `[lints.rust]` declares the now-unknown `cfg` value so each of them does
+not warn.
+
+Membership is deliberate and worth keeping: it is what runs this copy's own 82 tests here, and
+those tests are the only thing guarding the `decimal.rs` change below. `vendor/spareval` is
+excluded instead and has its tests run in HOLOS's workspace.
 
 ## The change
 

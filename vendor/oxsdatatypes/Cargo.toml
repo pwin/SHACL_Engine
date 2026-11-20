@@ -36,7 +36,6 @@ rustdoc-args = [
 ]
 
 [features]
-custom-now = []
 js = ["js-sys"]
 
 [lib]
@@ -51,6 +50,9 @@ version = "0.3.85"
 optional = true
 
 [lints.rust]
+# `custom-now` is removed from [features] above, so the cfg blocks that test for
+# it are permanently false and cargo would otherwise warn on each one.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("custom-now"))'] }
 absolute_paths_not_starting_with_crate = "warn"
 elided_lifetimes_in_paths = "warn"
 explicit_outlives_requirements = "warn"
