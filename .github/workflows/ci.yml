@@ -47,6 +47,24 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo fmt --all --check
 
+  # Deliberately no `--all-features` run anywhere here. The engine has two
+  # feature axes, `rdf-12` and `parallel`, and between the default
+  # configuration above and the `rdf-11` job below they are both covered.
+  #
+  # `--all-features` would add nothing but the features of `vendor/oxsdatatypes`,
+  # which is a workspace member rather than only a `[patch.crates-io]` entry. One
+  # of those, `custom-now`, is a contract with the embedder rather than a choice:
+  # it makes the crate declare `custom_ox_now` and leaves the host to define it,
+  # which suits a zkvm or no-std target and nothing in this workspace. Turning it
+  # on used to fail at the linker; the feature is removed from the vendored
+  # manifest now, and `vendor/oxsdatatypes/PROVENANCE.md` says why.
+  #
+  # It stays uncovered on purpose. A third full test run costs about what the
+  # first one does, and a link error cannot be caught more cheaply -- `cargo
+  # check` does not link -- so the price is the whole job for a configuration
+  # nobody ships. If it breaks again it will break for whoever types the command,
+  # not for a user.
+
   # The engine without RDF 1.2, as an RDF 1.1 tool embeds it: it must build
   # without the Oxigraph crates' RDF 1.2 types, and pass the W3C suites but for
   # the documents written in RDF 1.2, which `tests/w3c.rs` names.
