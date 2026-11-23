@@ -1,5 +1,12 @@
 # shacl
 
+> **The SHACL engine has moved to [pwin/SemopsSystem](https://github.com/pwin/SemopsSystem).** It is developed and released
+> there, in [`shacl/`](https://github.com/pwin/SemopsSystem/tree/main/shacl), with HOLOS and tarka. From 0.30.0, the
+> `shacl` wheel, the `shacl-wasm` and `shacl-wasm-node` packages and the `shacl` command are
+> published from there, at the workspace's version. This repository keeps the history up to
+> 0.3.9 and no longer releases. Please open issues and pull requests
+> [there](https://github.com/pwin/SemopsSystem/issues).
+
 A high-performance SHACL validation engine in Rust, targeting full conformance
 with the W3C SHACL 1.0 and 1.2 test suites.
 
